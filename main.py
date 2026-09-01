@@ -1361,7 +1361,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 full_message += f"\n\n🎁 MILESTONE: {milestone.description}"
             if image_data:
                 await query.edit_message_caption(
-                    caption=f"{query.message.caption}\n\n{full_message}"
+                    caption=f"{query.message.caption} or ''\n\n{full_message}"
                 )
             else:
                 await query.edit_message_text(f"{query.message.text}\n\n{full_message}")
