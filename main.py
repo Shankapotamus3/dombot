@@ -1,7 +1,11 @@
 import os
 import random
+import asyncio
+import json
+import re
+import io
+import base64
 import threading
-import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -9,7 +13,7 @@ from collections import defaultdict
 
 import requests
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
@@ -17,7 +21,7 @@ import logging
 
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, Float, ForeignKey, Enum as SQLEnum, desc, JSON
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship, backref
+from sqlalchemy.orm import sessionmaker, Session, relationship
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -72,23 +76,29 @@ class BotParameters(Base):
     learning_enabled = Column(Boolean, default=True)
     analysis_frequency = Column(Integer, default=5)
     adaptation_rate = Column(Float, default=0.3)
+    
     possessiveness = Column(Float, default=0.6)
     degradation_level = Column(Float, default=0.4)
     psychological_focus = Column(Float, default=0.5)
     unpredictability = Column(Float, default=0.5)
+    
     photo_demand_frequency = Column(Float, default=0.2)
     task_timeout_minutes = Column(Integer, default=30)
     escalation_threshold = Column(Integer, default=2)
+    
     verbosity = Column(String, default="medium")
     response_delay_enabled = Column(Boolean, default=True)
     min_response_delay_seconds = Column(Integer, default=2)
     max_response_delay_seconds = Column(Integer, default=10)
+    
     min_interval_minutes = Column(Integer, default=60)
     max_interval_minutes = Column(Integer, default=180)
     active_hours_start = Column(Integer, default=8)
     active_hours_end = Column(Integer, default=23)
+    
     preferred_task_types = Column(JSON, default=list)
     avoided_topics = Column(JSON, default=list)
+    
     avatar_enabled = Column(Boolean, default=True)
     avatar_frequency = Column(Float, default=0.7)
     avatar_style = Column(String, default="photorealistic")
@@ -96,8 +106,10 @@ class BotParameters(Base):
     avatar_build = Column(String, default="muscular")
     avatar_hair = Column(String, default="dark")
     avatar_age_appearance = Column(String, default="28")
+    
     rewards_enabled = Column(Boolean, default=True)
     reward_frequency = Column(Float, default=0.1)
+    
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class UserState(Base):
@@ -118,23 +130,18 @@ class UserState(Base):
     safe_word_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     conversation_mode = Column(Boolean, default=True)
+    
     interaction_count = Column(Integer, default=0)
     last_analysis = Column(DateTime)
     relationship_notes = Column(Text, default="")
     learned_preferences = Column(JSON, default=dict)
+    
     current_streak = Column(Integer, default=0)
     longest_streak = Column(Integer, default=0)
     reward_points = Column(Integer, default=0)
     last_reward_date = Column(DateTime, nullable=True)
     privileges = Column(JSON, default=list)
     rest_day_until = Column(DateTime, nullable=True)
-    
-    parameters = relationship("BotParameters", uselist=False, backref="user", foreign_keys="BotParameters.user_id")
-    tasks = relationship("Task", backref="user", order_by="Task.created_at", foreign_keys="Task.user_id")
-    messages = relationship("ConversationMessage", order_by="ConversationMessage.timestamp", foreign_keys="ConversationMessage.user_id")
-    rewards = relationship("Reward", order_by="Reward.created_at", foreign_keys="Reward.user_id")
-    avatar_images = relationship("AvatarImage", foreign_keys="AvatarImage.user_id")
-    current_task = relationship("Task", uselist=False, foreign_keys=[current_task_id])
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -152,6 +159,8 @@ class Task(Base):
     photo_url = Column(String, nullable=True)
     escalation_count = Column(Integer, default=0)
     user_response_time = Column(Float, nullable=True)
+    
+    user = relationship("UserState", back_populates="tasks")
 
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
@@ -202,6 +211,13 @@ class Reward(Base):
 # Create tables
 Base.metadata.create_all(bind=engine)
 
+# Setup relationships
+BotParameters.user = relationship("UserState", back_populates="parameters")
+UserState.tasks = relationship("Task", order_by=Task.created_at.desc())
+UserState.messages = relationship("ConversationMessage", order_by=ConversationMessage.timestamp.desc())
+UserState.rewards = relationship("Reward", order_by=Reward.created_at.desc())
+UserState.avatar_images = relationship("AvatarImage")
+
 # Configuration
 scheduler = BackgroundScheduler()
 
@@ -234,6 +250,12 @@ def get_or_create_user(db: Session, chat_id: str):
         params = BotParameters(user_id=user.id)
         db.add(params)
         db.commit()
+    
+    if not user.parameters:
+        params = BotParameters(user_id=user.id)
+        db.add(params)
+        db.commit()
+        db.refresh(user)
     
     return user
 
@@ -647,7 +669,7 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
                 user.parameters.min_response_delay_seconds,
                 user.parameters.max_response_delay_seconds
             )
-            time.sleep(delay)
+            asyncio.create_task(asyncio.sleep(delay))
         
         response = requests.post(
             VENICE_API_URL,
@@ -713,7 +735,7 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
     idx = levels.index(current)
     return levels[idx - 1] if idx > 0 else current
 
-def process_message(update: Update, context, is_command: bool = False):
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     params = user.parameters
@@ -722,7 +744,7 @@ def process_message(update: Update, context, is_command: bool = False):
         if update.message.text and SAFE_WORD in update.message.text.upper():
             pass
         else:
-            context.bot.send_message(chat_id=update.effective_chat.id, text="🛑 Safe word active.")
+            await update.message.reply_text("🛑 Safe word active.")
             return
     
     user_text = update.message.text if update.message.text else "[image]"
@@ -780,19 +802,18 @@ def process_message(update: Update, context, is_command: bool = False):
         if send_avatar:
             image_data = AvatarGenerator.generate_avatar(user, avatar_mood, db)
             if image_data:
-                context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
+                await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
                     caption=ai_response,
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             else:
-                context.bot.send_message(chat_id=update.effective_chat.id, text=ai_response, reply_markup=InlineKeyboardMarkup(keyboard))
+                await update.message.reply_text(ai_response, reply_markup=InlineKeyboardMarkup(keyboard))
         else:
-            context.bot.send_message(chat_id=update.effective_chat.id, text=ai_response, reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.message.reply_text(ai_response, reply_markup=InlineKeyboardMarkup(keyboard))
         
         scheduler.add_job(
-            lambda: check_escalation_wrapper(str(update.effective_chat.id)),
+            lambda: asyncio.run(check_escalation_wrapper(str(update.effective_chat.id))),
             trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
             id=f"escalation_check_{update.effective_chat.id}",
             replace_existing=True
@@ -805,17 +826,16 @@ def process_message(update: Update, context, is_command: bool = False):
         if send_avatar:
             image_data = AvatarGenerator.generate_avatar(user, avatar_mood, db)
             if image_data:
-                context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
+                await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
                     caption=ai_response
                 )
             else:
-                context.bot.send_message(chat_id=update.effective_chat.id, text=ai_response)
+                await update.message.reply_text(ai_response)
         else:
-            context.bot.send_message(chat_id=update.effective_chat.id, text=ai_response)
+            await update.message.reply_text(ai_response)
 
-def check_escalation(db: Session, user: UserState):
+async def check_escalation(db: Session, user: UserState):
     if not user.awaiting_response or not user.last_message_time:
         return
     
@@ -837,20 +857,20 @@ def check_escalation(db: Session, user: UserState):
         image_data = AvatarGenerator.generate_avatar(user, AvatarMood.ANGRY, db)
         
         if image_data:
-            bot.send_photo(
+            await bot.send_photo(
                 chat_id=user.chat_id,
                 photo=InputFile(io.BytesIO(image_data), filename="dom_angry.jpg"),
                 caption=f"⬆️ ESCALATION ⬆️\n\n{msg}"
             )
         else:
-            bot.send_message(chat_id=user.chat_id, text=f"⬆️ ESCALATION ⬆️\n\n{msg}")
+            await bot.send_message(chat_id=user.chat_id, text=f"⬆️ ESCALATION ⬆️\n\n{msg}")
 
-def check_escalation_wrapper(chat_id: str):
+async def check_escalation_wrapper(chat_id: str):
     db = next(get_db())
     user = get_or_create_user(db, chat_id)
-    check_escalation(db, user)
+    await check_escalation(db, user)
 
-def send_scheduled_dom_message():
+async def send_scheduled_dom_message():
     db = SessionLocal()
     user = get_or_create_user(db, USER_CHAT_ID)
     params = user.parameters
@@ -908,21 +928,21 @@ def send_scheduled_dom_message():
         image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
         
         if image_data:
-            bot.send_photo(
+            await bot.send_photo(
                 chat_id=USER_CHAT_ID,
                 photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
                 caption=message,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            bot.send_message(
+            await bot.send_message(
                 chat_id=USER_CHAT_ID,
                 text=message,
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         
         scheduler.add_job(
-            lambda: check_escalation_wrapper(USER_CHAT_ID),
+            lambda: asyncio.run(check_escalation_wrapper(USER_CHAT_ID)),
             trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
             id=f"escalation_check_{USER_CHAT_ID}",
             replace_existing=True
@@ -942,16 +962,16 @@ def send_scheduled_dom_message():
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
         
         if image_data:
-            bot.send_photo(
+            await bot.send_photo(
                 chat_id=USER_CHAT_ID,
                 photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
                 caption=message
             )
         else:
-            bot.send_message(chat_id=USER_CHAT_ID, text=message)
+            await bot.send_message(chat_id=USER_CHAT_ID, text=message)
 
 # Telegram Command Handlers
-def start_command(update: Update, context):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = """Welcome, pet. I am your Dom.
 
 I learn. I adapt. I reward. I punish.
@@ -967,9 +987,9 @@ Commands:
 
 Obey me, and you will be rewarded. Fail me, and face consequences."""
     
-    context.bot.send_message(chat_id=update.effective_chat.id, text=welcome)
+    await update.message.reply_text(welcome)
 
-def status_command(update: Update, context):
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
@@ -986,9 +1006,9 @@ Reward Points: ⭐ {user.reward_points}
 
 Privileges: {', '.join(user.privileges) if user.privileges else 'None yet'}
 """
-    context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+    await update.message.reply_text(text)
 
-def rewards_command(update: Update, context):
+async def rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
@@ -1022,16 +1042,15 @@ def rewards_command(update: Update, context):
             text += f"• {r.description[:50]}\n"
     
     text += "\nUse /redeem to spend points"
-    context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+    await update.message.reply_text(text)
 
-def redeem_command(update: Update, context):
+async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
     if not context.args:
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"""💎 Redeem Points (You have: {user.reward_points}) 💎
+        await update.message.reply_text(
+            f"""💎 Redeem Points (You have: {user.reward_points}) 💎
 
 /redeem selfie (50 pts) - Custom selfie from me
 /redeem gentle (100 pts) - Reduce intensity 24h  
@@ -1052,11 +1071,11 @@ Earn points by completing tasks and maintaining streaks."""
     }
     
     if option not in costs:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Invalid option. Use /redeem to see options.")
+        await update.message.reply_text("Invalid option. Use /redeem to see options.")
         return
     
     if user.reward_points < costs[option]:
-        context.bot.send_message(chat_id=update.effective_chat.id, text=f"Not enough points. You have {user.reward_points}. Complete more tasks.")
+        await update.message.reply_text(f"Not enough points. You have {user.reward_points}. Complete more tasks.")
         return
     
     user.reward_points -= costs[option]
@@ -1065,21 +1084,19 @@ Earn points by completing tasks and maintaining streaks."""
         mood = random.choice([AvatarMood.SEDUCTIVE, AvatarMood.WORKOUT, AvatarMood.PLEASED])
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
         if image_data:
-            context.bot.send_photo(
-                chat_id=update.effective_chat.id,
+            await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(image_data), filename="dom_redeemed.jpg"),
                 caption="You earned this. Enjoy it."
             )
     
     elif option == "gentle":
         user.intensity = IntensityLevel.LOW.value
-        context.bot.send_message(chat_id=update.effective_chat.id, text="24 hours of gentleness. Don't get used to it, pet.")
+        await update.message.reply_text("24 hours of gentleness. Don't get used to it, pet.")
     
     elif option == "choice":
         user.privileges.append("next_task_choice")
-        context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="You may choose your next task. Reply with:\n"
+        await update.message.reply_text(
+            "You may choose your next task. Reply with:\n"
             "/choose physical - for body tasks\n"
             "/choose mental - for mind tasks\n"  
             "/choose service - for serving tasks"
@@ -1087,15 +1104,15 @@ Earn points by completing tasks and maintaining streaks."""
     
     elif option == "praise":
         msg = RewardSystem.generate_reward_message(user, "proud")
-        context.bot.send_message(chat_id=update.effective_chat.id, text=f"🌟 {msg} 🌟\n\n(Redeemed with points)")
+        await update.message.reply_text(f"🌟 {msg} 🌟\n\n(Redeemed with points)")
     
     db.commit()
 
-def selfie_command(update: Update, context):
+async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Generating my image...")
+    await update.message.reply_text("Generating my image...")
     
     if user.consecutive_failures > 0:
         mood = AvatarMood.DISAPPOINTED
@@ -1120,15 +1137,14 @@ def selfie_command(update: Update, context):
             AvatarMood.DOMINANT: "You belong to me."
         }
         
-        context.bot.send_photo(
-            chat_id=update.effective_chat.id,
+        await update.message.reply_photo(
             photo=InputFile(io.BytesIO(image_data), filename="dom_selfie.jpg"),
             caption=captions.get(mood, "Look at me.")
         )
     else:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Image generation failed. Try again.")
+        await update.message.reply_text("Image generation failed. Try again.")
 
-def avatar_command(update: Update, context):
+async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
          InlineKeyboardButton("Lean", callback_data="avatar_build_lean")],
@@ -1138,17 +1154,16 @@ def avatar_command(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Customize how I appear to you, pet:",
+    await update.message.reply_text(
+        "Customize how I appear to you, pet:",
         reply_markup=reply_markup
     )
 
-def analyze_command(update: Update, context):
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Analyzing our dynamic...")
+    await update.message.reply_text("Analyzing our dynamic...")
     LearningEngine.analyze_user(db, user)
     
     image_data = AvatarGenerator.generate_avatar(user, AvatarMood.THOUGHTFUL, db)
@@ -1156,20 +1171,19 @@ def analyze_command(update: Update, context):
     text = f"Analysis complete.\n\nRelationship Notes:\n{user.relationship_notes[:400] if user.relationship_notes else 'Still learning...'}"
     
     if image_data:
-        context.bot.send_photo(
-            chat_id=update.effective_chat.id,
+        await update.message.reply_photo(
             photo=InputFile(io.BytesIO(image_data), filename="dom_thinking.jpg"),
             caption=text
         )
     else:
-        context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+        await update.message.reply_text(text)
 
-def privileges_command(update: Update, context):
+async def privileges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
     
     if not user.privileges:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="No privileges earned yet. Obey more tasks.")
+        await update.message.reply_text("No privileges earned yet. Obey more tasks.")
         return
     
     privilege_descriptions = {
@@ -1184,11 +1198,11 @@ def privileges_command(update: Update, context):
         desc = privilege_descriptions.get(priv, priv)
         text += f"• {desc}\n"
     
-    context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+    await update.message.reply_text(text)
 
-def button_callback(update: Update, context):
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
@@ -1198,17 +1212,17 @@ def button_callback(update: Update, context):
         if data == "avatar_toggle":
             user.parameters.avatar_enabled = not user.parameters.avatar_enabled
             db.commit()
-            query.edit_message_text(f"Avatar {'enabled' if user.parameters.avatar_enabled else 'disabled'}")
+            await query.edit_message_text(f"Avatar {'enabled' if user.parameters.avatar_enabled else 'disabled'}")
             return
         elif data.startswith("avatar_build_"):
             user.parameters.avatar_build = data.replace("avatar_build_", "")
             db.commit()
-            query.edit_message_text(f"Build: {user.parameters.avatar_build}")
+            await query.edit_message_text(f"Build: {user.parameters.avatar_build}")
             return
         elif data.startswith("avatar_hair_"):
             user.parameters.avatar_hair = data.replace("avatar_hair_", "")
             db.commit()
-            query.edit_message_text(f"Hair: {user.parameters.avatar_hair}")
+            await query.edit_message_text(f"Hair: {user.parameters.avatar_hair}")
             return
     
     response_time = None
@@ -1258,12 +1272,12 @@ def button_callback(update: Update, context):
                 full_message += f"\n\n🎁 MILESTONE: {milestone.description}"
             
             if image_data:
-                query.edit_message_caption(caption=f"{query.message.caption}\n\n{full_message}")
+                await query.edit_message_caption(caption=f"{query.message.caption}\n\n{full_message}")
             else:
-                query.edit_message_text(f"{query.message.text}\n\n{full_message}")
+                await query.edit_message_text(f"{query.message.text}\n\n{full_message}")
             
             if random.random() < 0.1:
-                RewardSystem.send_random_reward(user, db)
+                await RewardSystem.send_random_reward(user, db)
             
     elif data.startswith("fail_"):
         task_id = int(data.split("_")[1])
@@ -1286,18 +1300,18 @@ def button_callback(update: Update, context):
             msg = generate_ai_response(user, "My pet failed me. I am displeased.", db)
             
             if image_data:
-                query.edit_message_caption(caption=f"{query.message.caption}\n\n✗ {msg}")
+                await query.edit_message_caption(caption=f"{query.message.caption}\n\n✗ {msg}")
             else:
-                query.edit_message_text(f"{query.message.text}\n\n✗ {msg}")
+                await query.edit_message_text(f"{query.message.text}\n\n✗ {msg}")
             
     elif data.startswith("photo_"):
         task_id = int(data.split("_")[1])
-        query.edit_message_text(f"{query.message.text}\n\n📸 Awaiting your proof...")
+        await query.edit_message_text(f"{query.message.text}\n\n📸 Awaiting your proof...")
         context.user_data["awaiting_photo"] = task_id
 
-def photo_handler(update: Update, context):
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "awaiting_photo" not in context.user_data:
-        process_message(update, context)
+        await process_message(update, context)
         return
     
     db = SessionLocal()
@@ -1308,7 +1322,7 @@ def photo_handler(update: Update, context):
     
     if task:
         photo = update.message.photo[-1]
-        file = photo.get_file()
+        file = await photo.get_file()
         
         task.photo_url = file.file_path
         task.status = TaskStatus.COMPLETED.value
@@ -1326,16 +1340,15 @@ def photo_handler(update: Update, context):
         msg = generate_ai_response(user, "My pet sent photo proof. Good pet.", db)
         
         if image_data:
-            context.bot.send_photo(
-                chat_id=update.effective_chat.id,
+            await update.message.reply_photo(
                 photo=InputFile(io.BytesIO(image_data), filename="dom_pleased.jpg"),
                 caption=msg
             )
         else:
-            context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+            await update.message.reply_text(msg)
 
-def message_handler(update: Update, context):
-    process_message(update, context, is_command=False)
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_message(update, context, is_command=False)
 
 def schedule_next_message():
     try:
@@ -1350,7 +1363,7 @@ def schedule_next_message():
     minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
     
     scheduler.add_job(
-        send_scheduled_dom_message,
+        lambda: asyncio.run(send_scheduled_dom_message()),
         trigger=IntervalTrigger(minutes=minutes),
         id="dom_message",
         replace_existing=True
@@ -1364,24 +1377,22 @@ def main():
     schedule_next_message()
     
     # Start Telegram bot
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    dp.add_handler(CommandHandler("start", start_command))
-    dp.add_handler(CommandHandler("status", status_command))
-    dp.add_handler(CommandHandler("rewards", rewards_command))
-    dp.add_handler(CommandHandler("redeem", redeem_command))
-    dp.add_handler(CommandHandler("selfie", selfie_command))
-    dp.add_handler(CommandHandler("avatar", avatar_command))
-    dp.add_handler(CommandHandler("analyze", analyze_command))
-    dp.add_handler(CommandHandler("privileges", privileges_command))
-    dp.add_handler(CallbackQueryHandler(button_callback))
-    dp.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    dp.add_handler(MessageHandler(filters.text & ~filters.COMMAND, message_handler))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("rewards", rewards_command))
+    application.add_handler(CommandHandler("redeem", redeem_command))
+    application.add_handler(CommandHandler("selfie", selfie_command))
+    application.add_handler(CommandHandler("avatar", avatar_command))
+    application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("privileges", privileges_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     logger.info("Dom Bot started. I am watching...")
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
