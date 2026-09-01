@@ -139,7 +139,7 @@ class BotParameters(Base):
     min_interval_minutes = Column(Integer, default=60)
     max_interval_minutes = Column(Integer, default=180)
     active_hours_start = Column(Integer, default=8)
-    active_hours_end = Column(Integer, default=20)  # Changed to 8pm
+    active_hours_end = Column(Integer, default=20)
     preferred_task_types = Column(JSON, default=list)
     avoided_topics = Column(JSON, default=list)
     avatar_enabled = Column(Boolean, default=True)
@@ -148,11 +148,11 @@ class BotParameters(Base):
     # Enhanced avatar params
     avatar_style = Column(String, default="photorealistic")
     avatar_ethnicity = Column(String, default="mixed")
-    avatar_nationality = Column(String, default="mediterranean")  # NEW
+    avatar_nationality = Column(String, default="mediterranean")
     avatar_build = Column(String, default="muscular")
     avatar_hair = Column(String, default="dark")
-    avatar_hair_length = Column(String, default="short")  # NEW
-    avatar_hair_color = Column(String, default="black")  # NEW
+    avatar_hair_length = Column(String, default="short")
+    avatar_hair_color = Column(String, default="black")
     avatar_age_appearance = Column(String, default="28")
     
     # Task system params
@@ -162,9 +162,9 @@ class BotParameters(Base):
     max_check_ins = Column(Integer, default=5)
     public_task_ratio = Column(Float, default=0.7)
     progressive_photo_count = Column(Integer, default=3)
-    conversation_ratio = Column(Float, default=0.4)  # NEW: 40% conversation
-    surprise_task_chance = Column(Float, default=0.15)  # NEW
-    stale_location_hours = Column(Integer, default=4)  # NEW
+    conversation_ratio = Column(Float, default=0.4)
+    surprise_task_chance = Column(Float, default=0.15)
+    stale_location_hours = Column(Integer, default=4)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -195,8 +195,6 @@ class UserState(Base):
     last_reward_date = Column(DateTime, nullable=True)
     privileges = Column(JSON, default=list)
     rest_day_until = Column(DateTime, nullable=True)
-    
-    # NEW: Location tracking
     current_location = Column(String, default=LocationType.UNKNOWN.value)
     last_location_update = Column(DateTime, nullable=True)
 
@@ -216,12 +214,12 @@ class Task(Base):
     photo_url = Column(String, nullable=True)
     escalation_count = Column(Integer, default=0)
     user_response_time = Column(Float, nullable=True)
-    is_extended_hold = Column(Boolean, default=False)  # NEW
-    location_type = Column(String, default=LocationType.UNKNOWN.value)  # NEW
-    difficulty = Column(String, default=IntensityLevel.HIGH.value)  # NEW
+    is_extended_hold = Column(Boolean, default=False)
+    location_type = Column(String, default=LocationType.UNKNOWN.value)
+    difficulty = Column(String, default=IntensityLevel.HIGH.value)
 
 
-class TaskCheckIn(Base):  # NEW TABLE
+class TaskCheckIn(Base):
     __tablename__ = "task_checkins"
     id = Column(Integer, primary_key=True)
     task_id = Column(Integer, ForeignKey("tasks.id"))
@@ -1265,7 +1263,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         user = get_or_create_user(db, str(update.effective_chat.id))
         params = user.parameters
         
-        # Night mode check (8pm-8am)
+        # Night mode check (8pm-8am Mountain) - FIXED
         current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
         if current_hour >= 20 or current_hour < 8:
             # Night mode - conversation only, no tasks
@@ -1440,7 +1438,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
         
-        full_message = f"{prefix}📋 YOUR TASK:\n{task_data['description']}\n\n⏰ Deadline: {'5 minutes' if is_surprise else params.task_timeout_minutes + ' minutes'}\n\n📸 PHOTO PROOF REQUIRED"
+        full_message = f"{prefix}📋 YOUR TASK:\n{task_data['description']}\n\n⏰ Deadline: {'5 minutes' if is_surprise else str(params.task_timeout_minutes) + ' minutes'}\n\n📸 PHOTO PROOF REQUIRED"
         
         dom_msg = ConversationMessage(
             user_id=user.id,
@@ -1619,7 +1617,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_or_create_user(db, str(update.effective_chat.id))
         data = query.data
         
-       # Location updates
+        # Location updates
         if data.startswith("loc_"):
             location_map = {
                 "loc_home": LocationType.HOME,
@@ -1635,7 +1633,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📍 Location updated: {new_loc.value}\n\nAwaiting my command...")
             return
         
-        # ADD THESE AVATAR HANDLERS HERE:
+        # AVATAR HANDLERS - ADDED
         elif data.startswith("avatar_build_"):
             build = data.replace("avatar_build_", "")
             user.parameters.avatar_build = build
@@ -1665,7 +1663,126 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Check-in photos 
+        # Check-in photos
+        if data.startswith("checkinphoto_"):
+            parts = data.split("_")
+            task_id = int(parts[1])
+            check_in_num = int(parts[2])
+            
+            context.user_data["awaiting_photo_type"] = "checkin"
+            context.user_data["awaiting_photo_task_id"] = task_id
+            context.user_data["awaiting_checkin_num"] = check_in_num
+            
+            await query.edit_message_caption(
+                caption=f"{query.message.caption}\n\n📸 Awaiting check-in #{check_in_num} photo..."
+            )
+            return
+        
+        # Final release photo
+        if data.startswith("finalphoto_"):
+            task_id = int(data.split("_")[1])
+            
+            context.user_data["awaiting_photo_type"] = "final_release"
+            context.user_data["awaiting_photo_task_id"] = task_id
+            
+            await query.edit_message_caption(
+                caption=f"{query.message.caption}\n\n📸 Send final proof of your state..."
+            )
+            return
+        
+        # "I Moved" confession
+        if data.startswith("moved_"):
+            task_id = int(data.split("_")[1])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task:
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.consecutive_failures += 1
+                user.current_streak = 0
+                user.awaiting_response = False
+                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
+                db.commit()
+                
+                mood = AvatarMood.ANGRY if user.consecutive_failures > 1 else AvatarMood.DISAPPOINTED
+                image_data = AvatarGenerator.generate_avatar(user, mood, db)
+                msg = "You moved. You failed. Consequences incoming."
+                
+                if image_data:
+                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
+                    await bot.send_photo(
+                        chat_id=user.chat_id,
+                        photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"),
+                        caption="I'm disappointed. You'll need to be punished.",
+                    )
+                else:
+                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
+            return
+        
+        # Standard complete
+        if data.startswith("complete_"):
+            task_id = int(data.split("_")[1])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task and task.status == TaskStatus.PENDING.value:
+                if task.requires_photo:
+                    context.user_data["awaiting_photo_type"] = "task_completion"
+                    context.user_data["awaiting_photo_task_id"] = task_id
+                    
+                    await query.edit_message_caption(
+                        caption=f"{query.message.caption}\n\n📸 Complete the task and send photo proof..."
+                    )
+                else:
+                    task.status = TaskStatus.COMPLETED.value
+                    task.completed_at = datetime.utcnow()
+                    user.completed_tasks += 1
+                    user.current_streak += 1
+                    db.commit()
+                    await query.edit_message_caption(caption="✓ Task completed!")
+            return
+        
+        # Alternative task acceptance
+        if data.startswith("complete_alt_"):
+            task_id = int(data.split("_")[2])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task:
+                context.user_data["awaiting_photo_type"] = "task_completion"
+                context.user_data["awaiting_photo_task_id"] = task_id
+                
+                await query.edit_message_caption(
+                    caption=f"{query.message.caption}\n\n📸 Complete the alternative task and send photo proof..."
+                )
+            return
+        
+        # Fail
+        if data.startswith("fail_"):
+            task_id = int(data.split("_")[1])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task and task.status == TaskStatus.PENDING.value:
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.consecutive_failures += 1
+                user.current_streak = 0
+                user.awaiting_response = False
+                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
+                db.commit()
+                
+                mood = AvatarMood.ANGRY if user.consecutive_failures > 2 else AvatarMood.DISAPPOINTED
+                image_data = AvatarGenerator.generate_avatar(user, mood, db)
+                msg = generate_ai_response(user, "My pet failed me. I am displeased.", db)
+                
+                if image_data:
+                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
+                else:
+                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
+            return
+        
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+    finally:
+        db.close()
 
 
 # ============================================================================
@@ -1993,10 +2110,10 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if image_data:
                 await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"),
-                    caption=f"⚠️ EMERGENCY RELEASE\\n\\n{msg}\\n\\n⭐ Points: -20",
+                    caption=f"⚠️ EMERGENCY RELEASE\n\n{msg}\n\n⭐ Points: -20",
                 )
             else:
-                await update.message.reply_text(f"⚠️ EMERGENCY RELEASE\\n\\n{msg}")
+                await update.message.reply_text(f"⚠️ EMERGENCY RELEASE\n\n{msg}")
         else:
             await update.message.reply_text("No active task to release you from.")
     finally:
@@ -2018,12 +2135,11 @@ def schedule_next_message():
     user = get_or_create_user(db, USER_CHAT_ID)
     params = user.parameters
     
-    # Check night mode
-    from datetime import timedelta
-    current_hour = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain Time
+    # Check night mode (Mountain Time)
+    current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
     if current_hour >= 20 or current_hour < 8:
-        # Schedule for 8am
-        next_time = datetime.now().replace(hour=8, minute=0, second=0)
+        # Schedule for 8am Mountain = 3pm UTC
+        next_time = datetime.utcnow().replace(hour=15, minute=0, second=0)
         if current_hour >= 20:
             next_time += timedelta(days=1)
         
@@ -2034,7 +2150,7 @@ def schedule_next_message():
             id="dom_message",
             replace_existing=True,
         )
-        logger.info(f"Night mode active. Next message at 8am.")
+        logger.info(f"Night mode active. Next message at 8am Mountain.")
         return
     
     minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
@@ -2054,9 +2170,8 @@ async def send_scheduled_dom_message():
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # Night mode check
-        from datetime import timedelta
-        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain Time
+        # Night mode check (Mountain Time)
+        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
         if current_hour >= 20 or current_hour < 8:
             return
         
@@ -2121,7 +2236,7 @@ async def send_scheduled_dom_message():
             mood = AvatarMood.COMMANDING
             image_data = AvatarGenerator.generate_avatar(user, mood, db)
             
-            full_message = f"📋 SCHEDULED TASK:\\n{task_data['description']}\\n\\n⏰ Deadline: {params.task_timeout_minutes} minutes\\n\\n📸 PHOTO PROOF REQUIRED"
+            full_message = f"📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED"
             
             dom_msg = ConversationMessage(
                 user_id=user.id,
