@@ -72,33 +72,26 @@ class BotParameters(Base):
     
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"), unique=True)
-    
     learning_enabled = Column(Boolean, default=True)
     analysis_frequency = Column(Integer, default=5)
     adaptation_rate = Column(Float, default=0.3)
-    
     possessiveness = Column(Float, default=0.6)
     degradation_level = Column(Float, default=0.4)
     psychological_focus = Column(Float, default=0.5)
     unpredictability = Column(Float, default=0.5)
-    
     photo_demand_frequency = Column(Float, default=0.2)
     task_timeout_minutes = Column(Integer, default=30)
     escalation_threshold = Column(Integer, default=2)
-    
     verbosity = Column(String, default="medium")
     response_delay_enabled = Column(Boolean, default=True)
     min_response_delay_seconds = Column(Integer, default=2)
     max_response_delay_seconds = Column(Integer, default=10)
-    
     min_interval_minutes = Column(Integer, default=60)
     max_interval_minutes = Column(Integer, default=180)
     active_hours_start = Column(Integer, default=8)
     active_hours_end = Column(Integer, default=23)
-    
     preferred_task_types = Column(JSON, default=list)
     avoided_topics = Column(JSON, default=list)
-    
     avatar_enabled = Column(Boolean, default=True)
     avatar_frequency = Column(Float, default=0.7)
     avatar_style = Column(String, default="photorealistic")
@@ -106,10 +99,8 @@ class BotParameters(Base):
     avatar_build = Column(String, default="muscular")
     avatar_hair = Column(String, default="dark")
     avatar_age_appearance = Column(String, default="28")
-    
     rewards_enabled = Column(Boolean, default=True)
     reward_frequency = Column(Float, default=0.1)
-    
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class UserState(Base):
@@ -130,18 +121,19 @@ class UserState(Base):
     safe_word_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     conversation_mode = Column(Boolean, default=True)
-    
     interaction_count = Column(Integer, default=0)
     last_analysis = Column(DateTime)
     relationship_notes = Column(Text, default="")
     learned_preferences = Column(JSON, default=dict)
-    
     current_streak = Column(Integer, default=0)
     longest_streak = Column(Integer, default=0)
     reward_points = Column(Integer, default=0)
     last_reward_date = Column(DateTime, nullable=True)
     privileges = Column(JSON, default=list)
     rest_day_until = Column(DateTime, nullable=True)
+    
+    # Simple relationship - just one direction
+    current_task = relationship("Task", foreign_keys=[current_task_id], remote_side="Task.id")
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -159,8 +151,6 @@ class Task(Base):
     photo_url = Column(String, nullable=True)
     escalation_count = Column(Integer, default=0)
     user_response_time = Column(Float, nullable=True)
-    
-    user = relationship("UserState", back_populates="tasks")
 
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
@@ -250,12 +240,6 @@ def get_or_create_user(db: Session, chat_id: str):
         params = BotParameters(user_id=user.id)
         db.add(params)
         db.commit()
-    
-    if not user.parameters:
-        params = BotParameters(user_id=user.id)
-        db.add(params)
-        db.commit()
-        db.refresh(user)
     
     return user
 
