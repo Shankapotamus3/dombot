@@ -317,7 +317,7 @@ if not params:
     params = BotParameters(user_id=user.id)
     db.add(params)
     db.commit()
-        mood_data = AvatarGenerator.MOOD_PROMPTS.get(mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING])
+    mood_data = AvatarGenerator.MOOD_PROMPTS.get(mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING])
         
         physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} man, {params.avatar_build} physique, {params.avatar_hair} hair"
         
