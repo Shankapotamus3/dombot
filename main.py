@@ -5,18 +5,17 @@ import json
 import re
 import io
 import base64
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
 from collections import defaultdict
 
 import requests
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import JSONResponse
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 import logging
 
@@ -66,18 +65,6 @@ class AvatarMood(str, Enum):
     SEDUCTIVE = "seductive"
     DOMINANT = "dominant"
     WORKOUT = "workout"
-
-class RewardType(str, Enum):
-    PRAISE = "praise"
-    PRIVILEGE = "privilege"
-    GIFT = "gift"
-    REDUCED_INTENSITY = "reduced_intensity"
-    SPECIAL_SELFIE = "special_selfie"
-    CHOICE = "choice"
-    REST_DAY = "rest_day"
-    VIDEO_REWARD = "video_reward"
-    MILESTONE = "milestone"
-    RANDOM = "random"
 
 # Database Models
 class BotParameters(Base):
@@ -231,21 +218,18 @@ UserState.messages = relationship("ConversationMessage", order_by=ConversationMe
 UserState.rewards = relationship("Reward", order_by=Reward.created_at.desc())
 UserState.avatar_images = relationship("AvatarImage")
 
-# App Configuration
-app = FastAPI(title="Dom Bot - Trainable AI with Avatar & Rewards")
+# Configuration
 scheduler = BackgroundScheduler()
 
-# Telegram
+# API Keys
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 USER_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-# Venice API
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 VENICE_API_URL = "https://api.venice.ai/api/v1/chat/completions"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
-
 SAFE_WORD = os.getenv("SAFE_WORD", "RED")
+
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 def get_db():
     db = SessionLocal()
@@ -1387,45 +1371,12 @@ def schedule_next_message():
     
     logger.info(f"Next message in {minutes} minutes")
 
-# FastAPI endpoints
-@app.get("/")
-def health_check():
-    next_run = None
-    job = scheduler.get_job("dom_message")
-    if job:
-        next_run = job.next_run_time.isoformat() if job.next_run_time else None
-    
-    return {
-        "status": "Dom Bot with Rewards running",
-        "next_message": next_run,
-        "features": ["conversation", "learning", "avatar", "rewards", "task_tracking"]
-    }
-
-@app.post("/trigger")
-async def manual_trigger():
-    await send_scheduled_dom_message()
-    schedule_next_message()
-    return {"status": "Message sent"}
-
-@app.get("/stats/{chat_id}")
-def get_stats(chat_id: str):
-    db = next(get_db())
-    user = get_or_create_user(db, chat_id)
-    
-    return {
-        "intensity": user.intensity,
-        "tasks_completed": user.completed_tasks,
-        "current_streak": user.current_streak,
-        "longest_streak": user.longest_streak,
-        "reward_points": user.reward_points,
-        "privileges": user.privileges
-    }
-
-@app.on_event("startup")
-async def startup_event():
+def main():
+    # Start scheduler
     scheduler.start()
     schedule_next_message()
     
+    # Start Telegram bot
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start_command))
@@ -1440,16 +1391,8 @@ async def startup_event():
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    import threading
-    def run_telegram():
-        application.run_polling()
-    
-    telegram_thread = threading.Thread(target=run_telegram)
-    telegram_thread.daemon = True
-    telegram_thread.start()
-    
-    logger.info("Dom Bot with Full Rewards started.")
+    logger.info("Dom Bot started. I am watching...")
+    application.run_polling()
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    scheduler.shutdown()
+if __name__ == "__main__":
+    main()
