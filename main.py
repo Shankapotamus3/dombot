@@ -1266,7 +1266,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         params = user.parameters
         
         # Night mode check (8pm-8am)
-        current_hour = datetime.utcnow().hour
+        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
         if current_hour >= 20 or current_hour < 8:
             # Night mode - conversation only, no tasks
             if update.message.text:
