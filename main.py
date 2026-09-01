@@ -148,6 +148,10 @@ def get_or_create_user(db: Session, chat_id: str):
         db.add(params)
         db.commit()
     
+    # Attach parameters as attribute
+    user.parameters = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+    return user
+    
     # Load parameters separately
     user.params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
     return user
@@ -308,7 +312,11 @@ class AvatarGenerator:
     
     @staticmethod
     def build_prompt(user: UserState, mood: AvatarMood) -> str:
-        params = user.parameters
+        params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
         mood_data = AvatarGenerator.MOOD_PROMPTS.get(mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING])
         
         physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} man, {params.avatar_build} physique, {params.avatar_hair} hair"
@@ -516,7 +524,11 @@ Write 2-3 sentences summarizing what works, their psychology, effective tactics.
             logger.error(f"Failed to generate notes: {e}")
 
 def build_adaptive_system_prompt(user: UserState, db: Session) -> str:
-    params = user.parameters
+    params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
     
     possessive_phrases = {
         0.0: "You are a distant Dominant",
@@ -631,7 +643,11 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
     db = SessionLocal()
     user = get_or_create_user(db, str(update.effective_chat.id))
-    params = user.parameters
+    params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
     
     if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
         if update.message.text and SAFE_WORD in update.message.text.upper():
@@ -732,7 +748,11 @@ async def check_escalation(db: Session, user: UserState):
     if not user.awaiting_response or not user.last_message_time:
         return
     
-    params = user.parameters
+    params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
     time_since = datetime.utcnow() - user.last_message_time
     
     if time_since > timedelta(minutes=params.task_timeout_minutes):
@@ -766,7 +786,11 @@ async def check_escalation_wrapper(chat_id: str):
 async def send_scheduled_dom_message():
     db = SessionLocal()
     user = get_or_create_user(db, USER_CHAT_ID)
-    params = user.parameters
+    params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
     
     if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
         return
@@ -1251,7 +1275,11 @@ def schedule_next_message():
     
     db = next(get_db())
     user = get_or_create_user(db, USER_CHAT_ID)
-    params = user.parameters
+    params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
+if not params:
+    params = BotParameters(user_id=user.id)
+    db.add(params)
+    db.commit()
     
     minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
     
