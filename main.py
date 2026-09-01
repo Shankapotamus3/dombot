@@ -2108,7 +2108,8 @@ def schedule_next_message():
     params = user.parameters
     
     # Check night mode
-    current_hour = datetime.utcnow().hour
+    from datetime import timedelta
+    current_hour = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain Time
     if current_hour >= 20 or current_hour < 8:
         # Schedule for 8am
         next_time = datetime.now().replace(hour=8, minute=0, second=0)
@@ -2143,7 +2144,8 @@ async def send_scheduled_dom_message():
         params = user.parameters
         
         # Night mode check
-        current_hour = datetime.utcnow().hour
+        from datetime import timedelta
+        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain Time
         if current_hour >= 20 or current_hour < 8:
             return
         
