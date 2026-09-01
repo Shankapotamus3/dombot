@@ -25,6 +25,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 import logging
 
+# Cloudinary imports
+import cloudinary
+import cloudinary.uploader
+
 from sqlalchemy import (
     create_engine,
     Column,
@@ -55,6 +59,18 @@ if DATABASE_URL.startswith("postgres://"):
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+# ============================================================================
+# CLOUDINARY CONFIG
+# ============================================================================
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True
+)
 
 
 # ============================================================================
@@ -217,6 +233,8 @@ class Task(Base):
     is_extended_hold = Column(Boolean, default=False)
     location_type = Column(String, default=LocationType.UNKNOWN.value)
     difficulty = Column(String, default=IntensityLevel.HIGH.value)
+    ai_verified = Column(Boolean, default=False)  # NEW: AI verification status
+    ai_analysis = Column(Text, nullable=True)  # NEW: AI analysis text
 
 
 class TaskCheckIn(Base):
@@ -317,6 +335,152 @@ def get_or_create_user(db: Session, chat_id: str):
         db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
     )
     return user
+
+
+# ============================================================================
+# AI PHOTO VERIFICATION
+# ============================================================================
+
+async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
+    """AI verification of photo proof using Venice AI"""
+    
+    # Upload to Cloudinary first (for storage and URL)
+    cloudinary_url = None
+    try:
+        upload_result = cloudinary.uploader.upload(
+            io.BytesIO(photo_bytes),
+            folder=f"dombot/{user.chat_id}",
+            public_id=f"task_{task.id}_{int(datetime.utcnow().timestamp())}",
+            resource_type="auto"
+        )
+        cloudinary_url = upload_result.get('secure_url')
+        logger.info(f"Photo uploaded to Cloudinary: {cloudinary_url}")
+    except Exception as e:
+        logger.error(f"Cloudinary upload failed: {e}")
+    
+    # Convert bytes to base64 for Venice vision
+    photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
+    
+    # Build verification prompt based on task type
+    task_type = task.task_type or "general"
+    verification_prompts = {
+        "public_exposure": "Analyze this photo carefully. Is the person naked or exposing themselves in a public/semi-public setting (bathroom, fitting room, parking garage, etc.)? Describe exactly what you see: location type, clothing state, pose, surroundings, and any identifying features. Be specific and detailed.",
+        "home": "Analyze this photo carefully. Is the person naked or in a submissive pose at home? Describe: exact position, clothing state, room setting, furniture visible, and whether they appear to be holding position obediently.",
+        "work": "Analyze this photo carefully. Is this an office/work setting? Is the person exposing themselves or in a risky position at work? Describe: exact location (desk, bathroom, conference room), clothing state, risk level of getting caught.",
+        "transit": "Analyze this photo carefully. Is the person in a vehicle or public transit? Are they exposed or in a risky position? Describe: location (car, bus, train), clothing state, visibility to others.",
+        "extended_hold": "Analyze this photo carefully. Is the person maintaining a static position (kneeling, hands behind back, forehead to floor, etc.)? Describe: exact pose, stillness, environment, suffering/obedience visible.",
+        "social": "Analyze this photo carefully. Is the person at a social gathering or someone else's home? Are they exposed or in a risky position? Describe: location type, clothing state, risk of being discovered.",
+        "general": "Analyze this photo carefully. Is the person obeying what appears to be a dominant command? Describe: nudity level, exact pose, location setting, and evidence of obedience.",
+    }
+    
+    prompt = verification_prompts.get(task_type, verification_prompts["general"])
+    
+    # Call Venice AI with vision
+    try:
+        response = requests.post(
+            VENICE_API_URL,
+            headers={
+                "Authorization": f"Bearer {VENICE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.2-90b-vision",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{photo_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "temperature": 0.2,
+                "max_tokens": 500,
+            },
+            timeout=60,
+        )
+        
+        if response.status_code == 200:
+            analysis = response.json()["choices"][0]["message"]["content"]
+            
+            # Determine if task is completed based on analysis
+            analysis_lower = analysis.lower()
+            
+            # Strong completion indicators
+            strong_completion = [
+                "naked", "nude", "completely naked", "fully exposed",
+                "kneeling", "on all fours", "forehead to floor",
+                "hands behind back", "legs spread", "bent over",
+                "exposed", "undressed", "bare", "no clothes"
+            ]
+            
+            # Moderate completion indicators
+            moderate_completion = [
+                "in position", "holding position", "obeying",
+                "submissive pose", "vulnerable position",
+                "public bathroom", "fitting room", "parking garage",
+                "at work", "office", "risky location"
+            ]
+            
+            # Failure indicators
+            failure_indicators = [
+                "fully clothed", "dressed", "wearing clothes",
+                "standing normally", "sitting normally",
+                "cannot determine", "unclear", "blurry",
+                "no person visible", "different person"
+            ]
+            
+            strong_score = sum(2 for ind in strong_completion if ind in analysis_lower)
+            moderate_score = sum(1 for ind in moderate_completion if ind in analysis_lower)
+            failure_score = sum(2 for ind in failure_indicators if ind in analysis_lower)
+            
+            total_score = strong_score + moderate_score - failure_score
+            
+            # Verification threshold
+            is_verified = total_score >= 2
+            
+            confidence = "high" if total_score >= 4 else "medium" if total_score >= 2 else "low"
+            
+            return {
+                "verified": is_verified,
+                "analysis": analysis,
+                "cloudinary_url": cloudinary_url,
+                "score": total_score,
+                "confidence": confidence,
+                "strong_matches": strong_score // 2,
+                "moderate_matches": moderate_score,
+                "failure_matches": failure_score // 2
+            }
+        else:
+            logger.error(f"Venice API error: {response.status_code} - {response.text}")
+            return {
+                "verified": False,
+                "analysis": f"AI analysis failed: HTTP {response.status_code}",
+                "cloudinary_url": cloudinary_url,
+                "score": 0,
+                "confidence": "none",
+                "strong_matches": 0,
+                "moderate_matches": 0,
+                "failure_matches": 0
+            }
+            
+    except Exception as e:
+        logger.error(f"AI verification error: {e}")
+        return {
+            "verified": False,
+            "analysis": f"Error during analysis: {str(e)}",
+            "cloudinary_url": cloudinary_url,
+            "score": 0,
+            "confidence": "none",
+            "strong_matches": 0,
+            "moderate_matches": 0,
+            "failure_matches": 0
+        }
 
 
 # ============================================================================
@@ -1480,7 +1644,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
 
 
 async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enhanced photo handler with multiple modes"""
+    """Enhanced photo handler with AI verification"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
@@ -1502,9 +1666,23 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("No photo detected. Try again.")
             return
         
+        # Get photo
         photo = update.message.photo[-1]
         file = await photo.get_file()
-        task.photo_url = file.file_path
+        photo_bytes = await file.download_as_bytearray()
+        
+        # Show "analyzing" message
+        analyzing_msg = await update.message.reply_text("🔍 Analyzing your proof with AI...")
+        
+        # AI Verification
+        verification = await verify_photo_with_ai(user, task, photo_bytes, db)
+        
+        # Store AI analysis in task
+        task.ai_analysis = verification["analysis"]
+        task.ai_verified = verification["verified"]
+        
+        # Delete analyzing message
+        await analyzing_msg.delete()
         
         if photo_type == "checkin":
             checkin = db.query(TaskCheckIn).filter(
@@ -1516,20 +1694,19 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             mood = AvatarMood.INSPECTING
             image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            msg = random.choice([
-                "I see you. Still there. Good.",
-                "Proof received. You haven't moved. Satisfactory.",
-                "I see you're obeying. Continue holding.",
-                "Photo verified. Stay exactly as you are.",
-            ])
+            
+            if verification["verified"]:
+                msg = f"✓ CHECK-IN #{check_in_num} VERIFIED\n\nMy AI confirms you're still obeying. Continue holding position."
+            else:
+                msg = f"⚠️ CHECK-IN #{check_in_num}\n\nMy AI sees: {verification['analysis'][:100]}...\n\nYou'd better still be there."
             
             if image_data:
                 await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(image_data), filename="inspecting.jpg"),
-                    caption=f"✓ CHECK-IN #{check_in_num} VERIFIED\n\n{msg}",
+                    caption=msg,
                 )
             else:
-                await update.message.reply_text(f"✓ CHECK-IN #{check_in_num} VERIFIED\n\n{msg}")
+                await update.message.reply_text(msg)
             
             db.commit()
             
@@ -1549,56 +1726,80 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             
             mood = AvatarMood.PLEASED if user.current_streak >= 3 else AvatarMood.COMMANDING
             image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            msg = random.choice([
-                "Released. You took that well. I'm pleased.",
-                "You may move. Your obedience has been noted.",
-                "Task complete. You suffered beautifully for me.",
-                "You're free. For now. Your proof was satisfactory.",
-            ])
+            
+            if verification["verified"]:
+                msg = f"✓ TASK COMPLETE - RELEASED\n\nMy AI confirms your obedience:\n{verification['analysis'][:150]}...\n\nYou're free. For now."
+            else:
+                msg = f"✓ TASK COMPLETE - RELEASED\n\nMy AI analysis: {verification['analysis'][:100]}...\n\nYou're free, but I'm watching you closer now."
             
             if image_data:
                 await update.message.reply_photo(
                     photo=InputFile(io.BytesIO(image_data), filename="released.jpg"),
-                    caption=f"✓ TASK COMPLETE - RELEASED\n\n{msg}\n\n🔥 Streak: {user.current_streak} | ⭐ Points: +10",
+                    caption=f"{msg}\n\n🔥 Streak: {user.current_streak} | ⭐ Points: +10",
                 )
             else:
-                await update.message.reply_text(f"✓ TASK COMPLETE\n\n{msg}")
+                await update.message.reply_text(f"{msg}\n\n⭐ Points: +10")
             
             db.commit()
             
         else:
-            # Standard completion
-            task.status = TaskStatus.COMPLETED.value
-            task.completed_at = datetime.utcnow()
+            # Standard task completion with verification
+            task.photo_url = verification.get('cloudinary_url') or file.file_path
             
-            user.completed_tasks += 1
-            user.current_streak += 1
-            user.consecutive_failures = 0
-            user.awaiting_response = False
-            user.reward_points += 5
-            
-            context.user_data.pop("awaiting_photo_type", None)
-            context.user_data.pop("awaiting_photo_task_id", None)
-            
-            mood = AvatarMood.INSPECTING if random.random() < 0.5 else AvatarMood.PLEASED
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            if user.current_streak >= 7:
-                msg = "Excellent. Your proof pleases me. You've earned my attention."
-            elif user.current_streak >= 3:
-                msg = "Good pet. Proof received and approved."
+            if verification["verified"]:
+                task.status = TaskStatus.COMPLETED.value
+                task.completed_at = datetime.utcnow()
+                
+                user.completed_tasks += 1
+                user.current_streak += 1
+                user.consecutive_failures = 0
+                user.awaiting_response = False
+                user.reward_points += 5
+                
+                context.user_data.pop("awaiting_photo_type", None)
+                context.user_data.pop("awaiting_photo_task_id", None)
+                
+                mood = AvatarMood.PLEASED
+                image_data = AvatarGenerator.generate_avatar(user, mood, db)
+                
+                msg = f"✓ PROOF VERIFIED\n\nMy AI confirms you obeyed:\n{verification['analysis'][:200]}...\n\nGood pet. Task complete."
+                
+                if image_data:
+                    await update.message.reply_photo(
+                        photo=InputFile(io.BytesIO(image_data), filename="approved.jpg"),
+                        caption=f"{msg}\n\n🔥 Streak: {user.current_streak} | Confidence: {verification['confidence']}",
+                    )
+                else:
+                    await update.message.reply_text(f"{msg}\n\n🔥 Streak: {user.current_streak}")
+                
+                db.commit()
+                
             else:
-                msg = "Satisfactory. Task complete."
-            
-            if image_data:
-                await update.message.reply_photo(
-                    photo=InputFile(io.BytesIO(image_data), filename="approved.jpg"),
-                    caption=f"✓ PROOF APPROVED\n\n{msg}\n\n🔥 Streak: {user.current_streak}",
-                )
-            else:
-                await update.message.reply_text(f"✓ PROOF APPROVED\n\n{msg}")
-            
-            db.commit()
+                # Verification failed - punishment
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.consecutive_failures += 1
+                user.current_streak = 0
+                user.awaiting_response = False
+                user.reward_points = max(0, user.reward_points - 10)
+                
+                context.user_data.pop("awaiting_photo_type", None)
+                context.user_data.pop("awaiting_photo_task_id", None)
+                
+                mood = AvatarMood.SUSPICIOUS
+                image_data = AvatarGenerator.generate_avatar(user, mood, db)
+                
+                msg = f"❌ VERIFICATION FAILED\n\nMy AI analysis:\n{verification['analysis'][:200]}...\n\nThis does NOT match your task. You will be punished."
+                
+                if image_data:
+                    await update.message.reply_photo(
+                        photo=InputFile(io.BytesIO(image_data), filename="suspicious.jpg"),
+                        caption=f"{msg}\n\n⭐ Points: -10 | Intensity increased",
+                    )
+                else:
+                    await update.message.reply_text(f"{msg}\n\n⭐ Points: -10")
+                
+                db.commit()
             
     except Exception as e:
         logger.error(f"Photo handler error: {e}")
@@ -1633,7 +1834,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📍 Location updated: {new_loc.value}\n\nAwaiting my command...")
             return
         
-        # AVATAR HANDLERS - ADDED
+        # AVATAR HANDLERS
         elif data.startswith("avatar_build_"):
             build = data.replace("avatar_build_", "")
             user.parameters.avatar_build = build
@@ -1730,7 +1931,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.user_data["awaiting_photo_task_id"] = task_id
                     
                     await query.edit_message_caption(
-                        caption=f"{query.message.caption}\n\n📸 Complete the task and send photo proof..."
+                        caption=f"{query.message.caption}\n\n📸 Complete the task and send photo proof. My AI will verify..."
                     )
                 else:
                     task.status = TaskStatus.COMPLETED.value
@@ -1793,6 +1994,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = """Welcome, pet. I am your Dom.
 
 I learn. I adapt. I reward. I punish.
+I VERIFY. My AI watches your proof.
 
 Commands:
 /status - Your standing
@@ -1829,6 +2031,8 @@ Longest Streak: {user.longest_streak} tasks
 Reward Points: ⭐ {user.reward_points}
 
 Privileges: {', '.join(user.privileges) if user.privileges else 'None yet'}
+
+⚠️ My AI now verifies all photo proof
 """
         await update.message.reply_text(text)
     finally:
@@ -2236,7 +2440,7 @@ async def send_scheduled_dom_message():
             mood = AvatarMood.COMMANDING
             image_data = AvatarGenerator.generate_avatar(user, mood, db)
             
-            full_message = f"📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED"
+            full_message = f"📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
             
             dom_msg = ConversationMessage(
                 user_id=user.id,
@@ -2344,7 +2548,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v2.0 started. I am watching...")
+    logger.info("Dom Bot v2.0 with AI Verification started. I am watching...")
     application.run_polling()
 
 
