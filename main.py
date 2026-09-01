@@ -9,7 +9,7 @@ from collections import defaultdict
 
 import requests
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
@@ -1376,8 +1376,8 @@ def main():
     dp.add_handler(CommandHandler("analyze", analyze_command))
     dp.add_handler(CommandHandler("privileges", privileges_command))
     dp.add_handler(CallbackQueryHandler(button_callback))
-    dp.add_handler(MessageHandler(Filters.photo, photo_handler))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
+    dp.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    dp.add_handler(MessageHandler(filters.text & ~filters.COMMAND, message_handler))
     
     logger.info("Dom Bot started. I am watching...")
     updater.start_polling()
