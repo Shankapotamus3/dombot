@@ -384,7 +384,7 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.2-90b-vision",
+                "model": "claude-opus-5",
                 "messages": [
                     {
                         "role": "user",
