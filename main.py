@@ -115,13 +115,6 @@ class Reward(Base):
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-# Setup relationships
-BotParameters.user = relationship("UserState", back_populates="parameters")
-UserState.tasks = relationship("Task", order_by=Task.created_at.desc())
-UserState.messages = relationship("ConversationMessage", order_by=ConversationMessage.timestamp.desc())
-UserState.rewards = relationship("Reward", order_by=Reward.created_at.desc())
-UserState.avatar_images = relationship("AvatarImage")
-
 # Configuration
 scheduler = BackgroundScheduler()
 
