@@ -1619,7 +1619,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_or_create_user(db, str(update.effective_chat.id))
         data = query.data
         
-        # Location updates
+       # Location updates
         if data.startswith("loc_"):
             location_map = {
                 "loc_home": LocationType.HOME,
@@ -1635,126 +1635,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📍 Location updated: {new_loc.value}\n\nAwaiting my command...")
             return
         
-        # Check-in photos
-        if data.startswith("checkinphoto_"):
-            parts = data.split("_")
-            task_id = int(parts[1])
-            check_in_num = int(parts[2])
-            
-            context.user_data["awaiting_photo_type"] = "checkin"
-            context.user_data["awaiting_photo_task_id"] = task_id
-            context.user_data["awaiting_checkin_num"] = check_in_num
-            
-            await query.edit_message_caption(
-                caption=f"{query.message.caption}\n\n📸 Awaiting check-in #{check_in_num} photo..."
+        # ADD THESE AVATAR HANDLERS HERE:
+        elif data.startswith("avatar_build_"):
+            build = data.replace("avatar_build_", "")
+            user.parameters.avatar_build = build
+            db.commit()
+            await query.edit_message_text(f"Build: {build}")
+            return
+        
+        elif data.startswith("avatar_hair_"):
+            length = data.replace("avatar_hair_", "")
+            user.parameters.avatar_hair_length = length
+            db.commit()
+            await query.edit_message_text(f"Hair length: {length}")
+            return
+        
+        elif data.startswith("avatar_color_"):
+            color = data.replace("avatar_color_", "")
+            user.parameters.avatar_hair_color = color
+            db.commit()
+            await query.edit_message_text(f"Hair color: {color}")
+            return
+        
+        elif data == "avatar_toggle":
+            user.parameters.avatar_enabled = not user.parameters.avatar_enabled
+            db.commit()
+            await query.edit_message_text(
+                f"Avatar {'enabled' if user.parameters.avatar_enabled else 'disabled'}"
             )
             return
         
-        # Final release photo
-        if data.startswith("finalphoto_"):
-            task_id = int(data.split("_")[1])
-            
-            context.user_data["awaiting_photo_type"] = "final_release"
-            context.user_data["awaiting_photo_task_id"] = task_id
-            
-            await query.edit_message_caption(
-                caption=f"{query.message.caption}\n\n📸 Send final proof of your state..."
-            )
-            return
-        
-        # "I Moved" confession
-        if data.startswith("moved_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task:
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.current_streak = 0
-                user.awaiting_response = False
-                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-                db.commit()
-                
-                mood = AvatarMood.ANGRY if user.consecutive_failures > 1 else AvatarMood.DISAPPOINTED
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                msg = "You moved. You failed. Consequences incoming."
-                
-                if image_data:
-                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
-                    await bot.send_photo(
-                        chat_id=user.chat_id,
-                        photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"),
-                        caption="I'm disappointed. You'll need to be punished.",
-                    )
-                else:
-                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
-            return
-        
-        # Standard complete
-        if data.startswith("complete_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task and task.status == TaskStatus.PENDING.value:
-                if task.requires_photo:
-                    context.user_data["awaiting_photo_type"] = "task_completion"
-                    context.user_data["awaiting_photo_task_id"] = task_id
-                    
-                    await query.edit_message_caption(
-                        caption=f"{query.message.caption}\n\n📸 Complete the task and send photo proof..."
-                    )
-                else:
-                    task.status = TaskStatus.COMPLETED.value
-                    task.completed_at = datetime.utcnow()
-                    user.completed_tasks += 1
-                    user.current_streak += 1
-                    db.commit()
-                    await query.edit_message_caption(caption="✓ Task completed!")
-            return
-        
-        # Alternative task acceptance
-        if data.startswith("complete_alt_"):
-            task_id = int(data.split("_")[2])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task:
-                context.user_data["awaiting_photo_type"] = "task_completion"
-                context.user_data["awaiting_photo_task_id"] = task_id
-                
-                await query.edit_message_caption(
-                    caption=f"{query.message.caption}\n\n📸 Complete the alternative task and send photo proof..."
-                )
-            return
-        
-        # Fail
-        if data.startswith("fail_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task and task.status == TaskStatus.PENDING.value:
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.current_streak = 0
-                user.awaiting_response = False
-                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-                db.commit()
-                
-                mood = AvatarMood.ANGRY if user.consecutive_failures > 2 else AvatarMood.DISAPPOINTED
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                msg = generate_ai_response(user, "My pet failed me. I am displeased.", db)
-                
-                if image_data:
-                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
-                else:
-                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
-            return
-        
-    except Exception as e:
-        logger.error(f"Callback error: {e}")
-    finally:
-        db.close()
+        # Check-in photos 
 
 
 # ============================================================================
