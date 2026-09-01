@@ -69,134 +69,48 @@ class AvatarMood(str, Enum):
 # Database Models
 class BotParameters(Base):
     __tablename__ = "bot_parameters"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"), unique=True)
-    learning_enabled = Column(Boolean, default=True)
-    analysis_frequency = Column(Integer, default=5)
-    adaptation_rate = Column(Float, default=0.3)
-    possessiveness = Column(Float, default=0.6)
-    degradation_level = Column(Float, default=0.4)
-    psychological_focus = Column(Float, default=0.5)
-    unpredictability = Column(Float, default=0.5)
-    photo_demand_frequency = Column(Float, default=0.2)
-    task_timeout_minutes = Column(Integer, default=30)
-    escalation_threshold = Column(Integer, default=2)
-    verbosity = Column(String, default="medium")
-    response_delay_enabled = Column(Boolean, default=True)
-    min_response_delay_seconds = Column(Integer, default=2)
-    max_response_delay_seconds = Column(Integer, default=10)
-    min_interval_minutes = Column(Integer, default=60)
-    max_interval_minutes = Column(Integer, default=180)
-    active_hours_start = Column(Integer, default=8)
-    active_hours_end = Column(Integer, default=23)
-    preferred_task_types = Column(JSON, default=list)
-    avoided_topics = Column(JSON, default=list)
-    avatar_enabled = Column(Boolean, default=True)
-    avatar_frequency = Column(Float, default=0.7)
-    avatar_style = Column(String, default="photorealistic")
-    avatar_ethnicity = Column(String, default="mixed")
-    avatar_build = Column(String, default="muscular")
-    avatar_hair = Column(String, default="dark")
-    avatar_age_appearance = Column(String, default="28")
-    rewards_enabled = Column(Boolean, default=True)
-    reward_frequency = Column(Float, default=0.1)
+    # ... all your columns ...
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class UserState(Base):
     __tablename__ = "user_states"
-    
     id = Column(Integer, primary_key=True)
     chat_id = Column(String, unique=True, index=True)
-    intensity = Column(String, default=IntensityLevel.MEDIUM.value)
-    total_tasks = Column(Integer, default=0)
-    completed_tasks = Column(Integer, default=0)
-    failed_tasks = Column(Integer, default=0)
-    consecutive_failures = Column(Integer, default=0)
-    last_message_time = Column(DateTime)
-    last_response_time = Column(DateTime)
-    awaiting_response = Column(Boolean, default=False)
+    # ... all your columns ...
     current_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True)
-    safe_word_active = Column(Boolean, default=False)
-    safe_word_until = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    conversation_mode = Column(Boolean, default=True)
-    interaction_count = Column(Integer, default=0)
-    last_analysis = Column(DateTime)
-    relationship_notes = Column(Text, default="")
-    learned_preferences = Column(JSON, default=dict)
-    current_streak = Column(Integer, default=0)
-    longest_streak = Column(Integer, default=0)
-    reward_points = Column(Integer, default=0)
-    last_reward_date = Column(DateTime, nullable=True)
-    privileges = Column(JSON, default=list)
-    rest_day_until = Column(DateTime, nullable=True)
-    
-    # Simple relationship - just one direction
-    current_task = relationship("Task", foreign_keys=[current_task_id], remote_side="Task.id")
+    # NO relationships here
 
 class Task(Base):
     __tablename__ = "tasks"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"))
-    description = Column(Text)
-    task_type = Column(String, default="general")
-    status = Column(String, default=TaskStatus.PENDING.value)
-    requires_photo = Column(Boolean, default=False)
-    intensity = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    deadline = Column(DateTime)
-    completed_at = Column(DateTime, nullable=True)
-    photo_url = Column(String, nullable=True)
-    escalation_count = Column(Integer, default=0)
-    user_response_time = Column(Float, nullable=True)
+    # ... other columns ...
 
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"))
-    message = Column(Text)
-    is_from_dom = Column(Boolean)
-    message_type = Column(String, default=MessageType.CONVERSATION.value)
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    emotional_tone = Column(String, nullable=True)
-    has_avatar = Column(Boolean, default=False)
+    # ... other columns ...
 
 class LearnedPattern(Base):
     __tablename__ = "learned_patterns"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"))
-    pattern_type = Column(String)
-    pattern_data = Column(JSON)
-    confidence = Column(Float, default=0.5)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    last_observed = Column(DateTime, default=datetime.utcnow)
+    # ... other columns ...
 
 class AvatarImage(Base):
     __tablename__ = "avatar_images"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"))
-    mood = Column(String)
-    image_data = Column(Text)
-    prompt_used = Column(Text)
-    generated_at = Column(DateTime, default=datetime.utcnow)
-    use_count = Column(Integer, default=0)
+    # ... other columns ...
 
 class Reward(Base):
     __tablename__ = "rewards"
-    
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"))
-    reward_type = Column(String)
-    description = Column(Text)
-    triggered_by = Column(String)
-    points_cost = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    redeemed = Column(Boolean, default=False)
+    # ... other columns ...
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -241,6 +155,8 @@ def get_or_create_user(db: Session, chat_id: str):
         db.add(params)
         db.commit()
     
+    # Load parameters separately
+    user.params = db.query(BotParameters).filter(BotParameters.user_id == user.id).first()
     return user
 
 class RewardSystem:
