@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Database
-DATABASE_URL = "sqlite:///./dombot.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -86,39 +86,32 @@ class BotParameters(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"), unique=True)
     
-    # Learning parameters
     learning_enabled = Column(Boolean, default=True)
     analysis_frequency = Column(Integer, default=5)
     adaptation_rate = Column(Float, default=0.3)
     
-    # Behavior parameters
     possessiveness = Column(Float, default=0.6)
     degradation_level = Column(Float, default=0.4)
     psychological_focus = Column(Float, default=0.5)
     unpredictability = Column(Float, default=0.5)
     
-    # Task parameters
     photo_demand_frequency = Column(Float, default=0.2)
     task_timeout_minutes = Column(Integer, default=30)
     escalation_threshold = Column(Integer, default=2)
     
-    # Communication parameters
     verbosity = Column(String, default="medium")
     response_delay_enabled = Column(Boolean, default=True)
     min_response_delay_seconds = Column(Integer, default=2)
     max_response_delay_seconds = Column(Integer, default=10)
     
-    # Scheduling
     min_interval_minutes = Column(Integer, default=60)
     max_interval_minutes = Column(Integer, default=180)
     active_hours_start = Column(Integer, default=8)
     active_hours_end = Column(Integer, default=23)
     
-    # Content preferences
     preferred_task_types = Column(JSON, default=list)
     avoided_topics = Column(JSON, default=list)
     
-    # Avatar parameters
     avatar_enabled = Column(Boolean, default=True)
     avatar_frequency = Column(Float, default=0.7)
     avatar_style = Column(String, default="photorealistic")
@@ -127,7 +120,6 @@ class BotParameters(Base):
     avatar_hair = Column(String, default="dark")
     avatar_age_appearance = Column(String, default="28")
     
-    # Reward parameters
     rewards_enabled = Column(Boolean, default=True)
     reward_frequency = Column(Float, default=0.1)
     
@@ -152,27 +144,17 @@ class UserState(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     conversation_mode = Column(Boolean, default=True)
     
-    # Learning data
     interaction_count = Column(Integer, default=0)
     last_analysis = Column(DateTime)
     relationship_notes = Column(Text, default="")
     learned_preferences = Column(JSON, default=dict)
     
-    # Reward data
     current_streak = Column(Integer, default=0)
     longest_streak = Column(Integer, default=0)
     reward_points = Column(Integer, default=0)
     last_reward_date = Column(DateTime, nullable=True)
     privileges = Column(JSON, default=list)
     rest_day_until = Column(DateTime, nullable=True)
-    
-    # Relationships
-    parameters = relationship("BotParameters", uselist=False, back_populates="user")
-    tasks = relationship("Task", back_populates="user")
-    messages = relationship("ConversationMessage")
-    patterns = relationship("LearnedPattern")
-    avatar_images = relationship("AvatarImage")
-    rewards = relationship("Reward", order_by="Reward.created_at.desc()")
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -226,11 +208,8 @@ class AvatarImage(Base):
     prompt_used = Column(Text)
     generated_at = Column(DateTime, default=datetime.utcnow)
     use_count = Column(Integer, default=0)
-    
-    user = relationship("UserState", back_populates="avatar_images")
 
 class Reward(Base):
-    """Track rewards given"""
     __tablename__ = "rewards"
     
     id = Column(Integer, primary_key=True)
@@ -241,14 +220,16 @@ class Reward(Base):
     points_cost = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     redeemed = Column(Boolean, default=False)
-    
-    user = relationship("UserState", back_populates="rewards")
 
 # Create tables
 Base.metadata.create_all(bind=engine)
 
 # Setup relationships
 BotParameters.user = relationship("UserState", back_populates="parameters")
+UserState.tasks = relationship("Task", order_by=Task.created_at.desc())
+UserState.messages = relationship("ConversationMessage", order_by=ConversationMessage.timestamp.desc())
+UserState.rewards = relationship("Reward", order_by=Reward.created_at.desc())
+UserState.avatar_images = relationship("AvatarImage")
 
 # App Configuration
 app = FastAPI(title="Dom Bot - Trainable AI with Avatar & Rewards")
@@ -264,9 +245,7 @@ VENICE_API_KEY = os.getenv("VENICE_API_KEY")
 VENICE_API_URL = "https://api.venice.ai/api/v1/chat/completions"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 
-# Constants
 SAFE_WORD = os.getenv("SAFE_WORD", "RED")
-CONVERSATION_HISTORY_LIMIT = 20
 
 def get_db():
     db = SessionLocal()
@@ -297,8 +276,6 @@ def get_or_create_user(db: Session, chat_id: str):
     return user
 
 class RewardSystem:
-    """Manages rewards and positive reinforcement"""
-    
     REWARD_THRESHOLDS = {
         3: {"type": "praise", "message": "3 tasks completed. You're learning your place.", "points": 10},
         5: {"type": "reduced_intensity", "message": "5 tasks. I'm pleased. I'll be gentler... for now.", "points": 15},
@@ -319,7 +296,6 @@ class RewardSystem:
     
     @staticmethod
     def check_milestones(user: UserState, db: Session):
-        """Check if user hit a reward milestone"""
         if not user.parameters.rewards_enabled:
             return None
             
@@ -339,7 +315,6 @@ class RewardSystem:
     
     @staticmethod
     def check_streak_rewards(user: UserState, db: Session):
-        """Check streak-based rewards"""
         if not user.parameters.rewards_enabled:
             return None
             
@@ -365,7 +340,6 @@ class RewardSystem:
     
     @staticmethod
     def grant_reward(user: UserState, db: Session, reward_data: dict, triggered_by: str):
-        """Grant a reward to user"""
         reward = Reward(
             user_id=user.id,
             reward_type=reward_data["type"],
@@ -375,7 +349,6 @@ class RewardSystem:
         )
         db.add(reward)
         
-        # Apply effects
         if reward_data["type"] == "reduced_intensity":
             user.intensity = deescalate_intensity(IntensityLevel(user.intensity)).value
         
@@ -397,78 +370,14 @@ class RewardSystem:
     
     @staticmethod
     def generate_reward_message(user: UserState, reward_type: str, context: str = "") -> str:
-        """Generate contextual reward message"""
         prompts = {
-            "praise": [
-                "Good pet. You've pleased me.",
-                "You obey well. I approve.",
-                "Exactly as commanded. You're learning.",
-                "Satisfactory. Continue.",
-                "You serve me well. Remember this feeling."
-            ],
-            "seductive": [
-                "You've earned my attention. Look at me.",
-                "Come closer, pet. You've been good.",
-                "I might let you see more... if you continue.",
-                "Your obedience excites me.",
-                "Perhaps I'll show you what you serve..."
-            ],
-            "proud": [
-                "You've exceeded my expectations. Rare.",
-                "I had doubts. You've erased them.",
-                "You could serve as an example to others.",
-                "My property is becoming valuable.",
-                "I'm almost proud of my pet."
-            ]
+            "praise": ["Good pet. You've pleased me.", "You obey well. I approve.", "Exactly as commanded.", "Satisfactory. Continue.", "You serve me well."],
+            "seductive": ["You've earned my attention. Look at me.", "Come closer, pet.", "I might let you see more...", "Your obedience excites me."],
+            "proud": ["You've exceeded my expectations.", "I had doubts. You've erased them.", "You could serve as an example.", "My property is becoming valuable."]
         }
-        
         return random.choice(prompts.get(reward_type, prompts["praise"]))
-    
-    @staticmethod
-    async def send_random_reward(user: UserState, db: Session):
-        """Send spontaneous reward for good behavior"""
-        if not user.parameters.rewards_enabled:
-            return
-            
-        if not user.current_streak or user.current_streak < 2:
-            return
-        
-        if random.random() > user.parameters.reward_frequency:
-            return
-        
-        msg = RewardSystem.generate_reward_message(user, "praise")
-        mood = random.choice([AvatarMood.PLEASED, AvatarMood.SEDUCTIVE])
-        
-        # Generate avatar
-        try:
-            from telegram import InputFile
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            if image_data:
-                await bot.send_photo(
-                    chat_id=user.chat_id,
-                    photo=InputFile(io.BytesIO(image_data), filename="dom_random.jpg"),
-                    caption=f"🎁 {msg}\n\n(You didn't expect this, did you?)"
-                )
-        except Exception as e:
-            logger.error(f"Failed to send random reward: {e}")
-            await bot.send_message(
-                chat_id=user.chat_id,
-                text=f"🎁 {msg}\n\n(You didn't expect this, did you?)"
-            )
-        
-        reward = Reward(
-            user_id=user.id,
-            reward_type="random",
-            description="Spontaneous praise for consistent behavior",
-            triggered_by="random"
-        )
-        db.add(reward)
-        db.commit()
 
 class AvatarGenerator:
-    """Generates Dom avatar images"""
-    
     MOOD_PROMPTS = {
         AvatarMood.COMMANDING: {
             "description": "standing tall, arms crossed, intense eye contact, powerful stance",
@@ -613,8 +522,6 @@ highly detailed, professional lighting, masculine, powerful, 4k quality"""
             return random.choice([AvatarMood.COMMANDING, AvatarMood.THOUGHTFUL])
 
 class LearningEngine:
-    """Analyzes patterns and updates bot behavior"""
-    
     @staticmethod
     def analyze_user(db: Session, user: UserState):
         if not user.parameters.learning_enabled:
@@ -954,7 +861,7 @@ async def check_escalation(db: Session, user: UserState):
     if time_since > timedelta(minutes=params.task_timeout_minutes):
         user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
         user.consecutive_failures += 1
-        user.current_streak = 0  # Reset streak on failure
+        user.current_streak = 0
         
         task = db.query(Task).filter(Task.id == user.current_task_id).first()
         if task:
@@ -991,7 +898,6 @@ async def send_scheduled_dom_message():
     if not (params.active_hours_start <= current_hour <= params.active_hours_end):
         return
     
-    # Check rest day
     if user.rest_day_until and datetime.utcnow() < user.rest_day_until:
         return
     
@@ -1040,4 +946,510 @@ async def send_scheduled_dom_message():
         if image_data:
             await bot.send_photo(
                 chat_id=USER_CHAT_ID,
-                photo=
+                photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
+                caption=message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await bot.send_message(
+                chat_id=USER_CHAT_ID,
+                text=message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        
+        scheduler.add_job(
+            lambda: asyncio.run(check_escalation_wrapper(USER_CHAT_ID)),
+            trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
+            id=f"escalation_check_{USER_CHAT_ID}",
+            replace_existing=True
+        )
+    else:
+        dom_msg = ConversationMessage(
+            user_id=user.id,
+            message=message,
+            is_from_dom=True,
+            message_type=MessageType.CONVERSATION.value,
+            has_avatar=True
+        )
+        db.add(dom_msg)
+        db.commit()
+        
+        mood = random.choice([AvatarMood.THOUGHTFUL, AvatarMood.WORKOUT, AvatarMood.SEDUCTIVE])
+        image_data = AvatarGenerator.generate_avatar(user, mood, db)
+        
+        if image_data:
+            await bot.send_photo(
+                chat_id=USER_CHAT_ID,
+                photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
+                caption=message
+            )
+        else:
+            await bot.send_message(chat_id=USER_CHAT_ID, text=message)
+
+# Telegram Command Handlers
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    welcome = """Welcome, pet. I am your Dom.
+
+I learn. I adapt. I reward. I punish.
+
+Commands:
+/status - Your standing
+/rewards - View your progress & milestones
+/redeem - Spend points on rewards
+/selfie - Request my image
+/avatar - Customize my appearance
+/analyze - Force learning analysis
+/privileges - View earned perks
+
+Obey me, and you will be rewarded. Fail me, and face consequences."""
+    
+    await update.message.reply_text(welcome)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    compliance = (user.completed_tasks / user.total_tasks * 100) if user.total_tasks > 0 else 0
+    
+    text = f"""
+📊 Your Status, pet
+
+Intensity: {user.intensity.upper()}
+Tasks: {user.completed_tasks}/{user.total_tasks} ({compliance:.0f}%)
+Current Streak: 🔥 {user.current_streak} tasks
+Longest Streak: {user.longest_streak} tasks
+Reward Points: ⭐ {user.reward_points}
+
+Privileges: {', '.join(user.privileges) if user.privileges else 'None yet'}
+"""
+    await update.message.reply_text(text)
+
+async def rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    next_milestone = None
+    for threshold in sorted(RewardSystem.REWARD_THRESHOLDS.keys()):
+        if threshold > user.completed_tasks:
+            next_milestone = threshold
+            break
+    
+    text = f"""
+🏆 Your Rewards 🏆
+
+🔥 Current Streak: {user.current_streak} tasks
+📈 Longest Streak: {user.longest_streak} tasks  
+✅ Total Completed: {user.completed_tasks}
+⭐ Reward Points: {user.reward_points}
+
+🎯 Next Milestone: {next_milestone} tasks
+"""
+    
+    text += "\n📋 Upcoming Rewards:\n"
+    for threshold, data in sorted(RewardSystem.REWARD_THRESHOLDS.items()):
+        if threshold >= user.completed_tasks:
+            status = "✓" if threshold <= user.completed_tasks else "○"
+            text += f"{status} {threshold} tasks: {data['message'][:40]}...\n"
+    
+    recent = db.query(Reward).filter(Reward.user_id == user.id).order_by(desc(Reward.created_at)).limit(3).all()
+    if recent:
+        text += "\n🎁 Recent Rewards:\n"
+        for r in recent:
+            text += f"• {r.description[:50]}\n"
+    
+    text += "\nUse /redeem to spend points"
+    await update.message.reply_text(text)
+
+async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    if not context.args:
+        await update.message.reply_text(
+            f"""💎 Redeem Points (You have: {user.reward_points}) 💎
+
+/redeem selfie (50 pts) - Custom selfie from me
+/redeem gentle (100 pts) - Reduce intensity 24h  
+/redeem choice (75 pts) - Choose next task type
+/redeem praise (25 pts) - Special praise message
+
+Earn points by completing tasks and maintaining streaks."""
+        )
+        return
+    
+    option = context.args[0].lower()
+    
+    costs = {
+        "selfie": 50,
+        "gentle": 100,
+        "choice": 75,
+        "praise": 25
+    }
+    
+    if option not in costs:
+        await update.message.reply_text("Invalid option. Use /redeem to see options.")
+        return
+    
+    if user.reward_points < costs[option]:
+        await update.message.reply_text(f"Not enough points. You have {user.reward_points}. Complete more tasks.")
+        return
+    
+    user.reward_points -= costs[option]
+    
+    if option == "selfie":
+        mood = random.choice([AvatarMood.SEDUCTIVE, AvatarMood.WORKOUT, AvatarMood.PLEASED])
+        image_data = AvatarGenerator.generate_avatar(user, mood, db)
+        if image_data:
+            await update.message.reply_photo(
+                photo=InputFile(io.BytesIO(image_data), filename="dom_redeemed.jpg"),
+                caption="You earned this. Enjoy it."
+            )
+    
+    elif option == "gentle":
+        user.intensity = IntensityLevel.LOW.value
+        await update.message.reply_text("24 hours of gentleness. Don't get used to it, pet.")
+    
+    elif option == "choice":
+        user.privileges.append("next_task_choice")
+        await update.message.reply_text(
+            "You may choose your next task. Reply with:\n"
+            "/choose physical - for body tasks\n"
+            "/choose mental - for mind tasks\n"  
+            "/choose service - for serving tasks"
+        )
+    
+    elif option == "praise":
+        msg = RewardSystem.generate_reward_message(user, "proud")
+        await update.message.reply_text(f"🌟 {msg} 🌟\n\n(Redeemed with points)")
+    
+    db.commit()
+
+async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    await update.message.reply_text("Generating my image...")
+    
+    if user.consecutive_failures > 0:
+        mood = AvatarMood.DISAPPOINTED
+    elif user.current_streak >= 7:
+        mood = AvatarMood.SEDUCTIVE
+    elif user.current_streak >= 3:
+        mood = AvatarMood.PLEASED
+    else:
+        mood = random.choice(list(AvatarMood))
+    
+    image_data = AvatarGenerator.generate_avatar(user, mood, db)
+    
+    if image_data:
+        captions = {
+            AvatarMood.PLEASED: "You've been good. I approve.",
+            AvatarMood.DISAPPOINTED: "I expect better from you.",
+            AvatarMood.ANGRY: "You test my patience.",
+            AvatarMood.COMMANDING: "Obey me.",
+            AvatarMood.SEDUCTIVE: "Come closer, pet.",
+            AvatarMood.WORKOUT: "This is what power looks like.",
+            AvatarMood.THOUGHTFUL: "I'm considering your next test...",
+            AvatarMood.DOMINANT: "You belong to me."
+        }
+        
+        await update.message.reply_photo(
+            photo=InputFile(io.BytesIO(image_data), filename="dom_selfie.jpg"),
+            caption=captions.get(mood, "Look at me.")
+        )
+    else:
+        await update.message.reply_text("Image generation failed. Try again.")
+
+async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
+         InlineKeyboardButton("Lean", callback_data="avatar_build_lean")],
+        [InlineKeyboardButton("Dark Hair", callback_data="avatar_hair_dark"),
+         InlineKeyboardButton("Light Hair", callback_data="avatar_hair_light")],
+        [InlineKeyboardButton("Toggle Avatar", callback_data="avatar_toggle")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Customize how I appear to you, pet:",
+        reply_markup=reply_markup
+    )
+
+async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    await update.message.reply_text("Analyzing our dynamic...")
+    LearningEngine.analyze_user(db, user)
+    
+    image_data = AvatarGenerator.generate_avatar(user, AvatarMood.THOUGHTFUL, db)
+    
+    text = f"Analysis complete.\n\nRelationship Notes:\n{user.relationship_notes[:400] if user.relationship_notes else 'Still learning...'}"
+    
+    if image_data:
+        await update.message.reply_photo(
+            photo=InputFile(io.BytesIO(image_data), filename="dom_thinking.jpg"),
+            caption=text
+        )
+    else:
+        await update.message.reply_text(text)
+
+async def privileges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    if not user.privileges:
+        await update.message.reply_text("No privileges earned yet. Obey more tasks.")
+        return
+    
+    privilege_descriptions = {
+        "late_response": "Extra 10 minutes to complete tasks",
+        "task_choice": "Can choose next task type",
+        "early_release": "Can end tasks 5 minutes early",
+        "photo_skip": "Can skip photo proof once per day"
+    }
+    
+    text = "👑 Your Earned Privileges 👑\n\n"
+    for priv in user.privileges:
+        desc = privilege_descriptions.get(priv, priv)
+        text += f"• {desc}\n"
+    
+    await update.message.reply_text(text)
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    data = query.data
+    
+    if data.startswith("avatar_"):
+        if data == "avatar_toggle":
+            user.parameters.avatar_enabled = not user.parameters.avatar_enabled
+            db.commit()
+            await query.edit_message_text(f"Avatar {'enabled' if user.parameters.avatar_enabled else 'disabled'}")
+            return
+        elif data.startswith("avatar_build_"):
+            user.parameters.avatar_build = data.replace("avatar_build_", "")
+            db.commit()
+            await query.edit_message_text(f"Build: {user.parameters.avatar_build}")
+            return
+        elif data.startswith("avatar_hair_"):
+            user.parameters.avatar_hair = data.replace("avatar_hair_", "")
+            db.commit()
+            await query.edit_message_text(f"Hair: {user.parameters.avatar_hair}")
+            return
+    
+    response_time = None
+    if user.last_message_time:
+        response_time = (datetime.utcnow() - user.last_message_time).total_seconds()
+    
+    if data.startswith("complete_"):
+        task_id = int(data.split("_")[1])
+        task = db.query(Task).filter(Task.id == task_id).first()
+        
+        if task and task.status == TaskStatus.PENDING.value:
+            task.status = TaskStatus.COMPLETED.value
+            task.completed_at = datetime.utcnow()
+            task.user_response_time = response_time
+            
+            user.completed_tasks += 1
+            user.current_streak += 1
+            if user.current_streak > user.longest_streak:
+                user.longest_streak = user.current_streak
+            
+            user.consecutive_failures = 0
+            user.awaiting_response = False
+            user.reward_points += 5
+            
+            streak_reward = RewardSystem.check_streak_rewards(user, db)
+            milestone = RewardSystem.check_milestones(user, db)
+            
+            db.commit()
+            
+            if user.current_streak >= 7:
+                mood = AvatarMood.SEDUCTIVE
+                response_type = "seductive"
+            elif user.current_streak >= 3:
+                mood = AvatarMood.PLEASED
+                response_type = "proud"
+            else:
+                mood = AvatarMood.THOUGHTFUL
+                response_type = "praise"
+            
+            msg = RewardSystem.generate_reward_message(user, response_type)
+            image_data = AvatarGenerator.generate_avatar(user, mood, db)
+            
+            full_message = f"✓ {msg}"
+            if streak_reward:
+                full_message += f"\n\n🔥 STREAK BONUS: {streak_reward.description}"
+            if milestone:
+                full_message += f"\n\n🎁 MILESTONE: {milestone.description}"
+            
+            if image_data:
+                await query.edit_message_caption(caption=f"{query.message.caption}\n\n{full_message}")
+            else:
+                await query.edit_message_text(f"{query.message.text}\n\n{full_message}")
+            
+            if random.random() < 0.1:
+                await RewardSystem.send_random_reward(user, db)
+            
+    elif data.startswith("fail_"):
+        task_id = int(data.split("_")[1])
+        task = db.query(Task).filter(Task.id == task_id).first()
+        
+        if task and task.status == TaskStatus.PENDING.value:
+            task.status = TaskStatus.FAILED.value
+            task.user_response_time = response_time
+            
+            user.failed_tasks += 1
+            user.consecutive_failures += 1
+            user.current_streak = 0
+            user.awaiting_response = False
+            user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
+            
+            db.commit()
+            
+            mood = AvatarMood.ANGRY if user.consecutive_failures > 2 else AvatarMood.DISAPPOINTED
+            image_data = AvatarGenerator.generate_avatar(user, mood, db)
+            msg = generate_ai_response(user, "My pet failed me. I am displeased.", db)
+            
+            if image_data:
+                await query.edit_message_caption(caption=f"{query.message.caption}\n\n✗ {msg}")
+            else:
+                await query.edit_message_text(f"{query.message.text}\n\n✗ {msg}")
+            
+    elif data.startswith("photo_"):
+        task_id = int(data.split("_")[1])
+        await query.edit_message_text(f"{query.message.text}\n\n📸 Awaiting your proof...")
+        context.user_data["awaiting_photo"] = task_id
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "awaiting_photo" not in context.user_data:
+        await process_message(update, context)
+        return
+    
+    db = SessionLocal()
+    user = get_or_create_user(db, str(update.effective_chat.id))
+    
+    task_id = context.user_data["awaiting_photo"]
+    task = db.query(Task).filter(Task.id == task_id).first()
+    
+    if task:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        
+        task.photo_url = file.file_path
+        task.status = TaskStatus.COMPLETED.value
+        task.completed_at = datetime.utcnow()
+        user.completed_tasks += 1
+        user.current_streak += 1
+        user.consecutive_failures = 0
+        user.awaiting_response = False
+        user.reward_points += 5
+        db.commit()
+        
+        del context.user_data["awaiting_photo"]
+        
+        image_data = AvatarGenerator.generate_avatar(user, AvatarMood.PLEASED, db)
+        msg = generate_ai_response(user, "My pet sent photo proof. Good pet.", db)
+        
+        if image_data:
+            await update.message.reply_photo(
+                photo=InputFile(io.BytesIO(image_data), filename="dom_pleased.jpg"),
+                caption=msg
+            )
+        else:
+            await update.message.reply_text(msg)
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_message(update, context, is_command=False)
+
+def schedule_next_message():
+    try:
+        scheduler.remove_all_jobs()
+    except:
+        pass
+    
+    db = next(get_db())
+    user = get_or_create_user(db, USER_CHAT_ID)
+    params = user.parameters
+    
+    minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
+    
+    scheduler.add_job(
+        lambda: asyncio.run(send_scheduled_dom_message()),
+        trigger=IntervalTrigger(minutes=minutes),
+        id="dom_message",
+        replace_existing=True
+    )
+    
+    logger.info(f"Next message in {minutes} minutes")
+
+# FastAPI endpoints
+@app.get("/")
+def health_check():
+    next_run = None
+    job = scheduler.get_job("dom_message")
+    if job:
+        next_run = job.next_run_time.isoformat() if job.next_run_time else None
+    
+    return {
+        "status": "Dom Bot with Rewards running",
+        "next_message": next_run,
+        "features": ["conversation", "learning", "avatar", "rewards", "task_tracking"]
+    }
+
+@app.post("/trigger")
+async def manual_trigger():
+    await send_scheduled_dom_message()
+    schedule_next_message()
+    return {"status": "Message sent"}
+
+@app.get("/stats/{chat_id}")
+def get_stats(chat_id: str):
+    db = next(get_db())
+    user = get_or_create_user(db, chat_id)
+    
+    return {
+        "intensity": user.intensity,
+        "tasks_completed": user.completed_tasks,
+        "current_streak": user.current_streak,
+        "longest_streak": user.longest_streak,
+        "reward_points": user.reward_points,
+        "privileges": user.privileges
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    scheduler.start()
+    schedule_next_message()
+    
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("rewards", rewards_command))
+    application.add_handler(CommandHandler("redeem", redeem_command))
+    application.add_handler(CommandHandler("selfie", selfie_command))
+    application.add_handler(CommandHandler("avatar", avatar_command))
+    application.add_handler(CommandHandler("analyze", analyze_command))
+    application.add_handler(CommandHandler("privileges", privileges_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    import threading
+    def run_telegram():
+        application.run_polling()
+    
+    telegram_thread = threading.Thread(target=run_telegram)
+    telegram_thread.daemon = True
+    telegram_thread.start()
+    
+    logger.info("Dom Bot with Full Rewards started.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    scheduler.shutdown()
