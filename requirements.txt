@@ -3,4 +3,3 @@ apscheduler==3.6.3
 requests==2.31.0
 python-dotenv==1.0.0
 sqlalchemy==1.4.50
-standard-imghdr==3.13.0
