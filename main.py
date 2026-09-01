@@ -133,12 +133,13 @@ class UserState(Base):
     privileges = Column(JSON, default=list)
     rest_day_until = Column(DateTime, nullable=True)
     
-    # Relationships
-    parameters = relationship("BotParameters", uselist=False, backref="user")
-    tasks = relationship("Task", backref="user", order_by="Task.created_at.desc()")
-    messages = relationship("ConversationMessage", order_by="ConversationMessage.timestamp.desc()")
-    rewards = relationship("Reward", order_by="Reward.created_at.desc()")
-    avatar_images = relationship("AvatarImage")
+    # Relationships with explicit foreign_keys
+    parameters = relationship("BotParameters", uselist=False, backref="user", foreign_keys="BotParameters.user_id")
+    tasks = relationship("Task", backref="user", order_by="Task.created_at", foreign_keys="Task.user_id")
+    messages = relationship("ConversationMessage", order_by="ConversationMessage.timestamp", foreign_keys="ConversationMessage.user_id")
+    rewards = relationship("Reward", order_by="Reward.created_at", foreign_keys="Reward.user_id")
+    avatar_images = relationship("AvatarImage", foreign_keys="AvatarImage.user_id")
+    current_task = relationship("Task", uselist=False, foreign_keys=[current_task_id])
 
 class Task(Base):
     __tablename__ = "tasks"
@@ -156,6 +157,7 @@ class Task(Base):
     photo_url = Column(String, nullable=True)
     escalation_count = Column(Integer, default=0)
     user_response_time = Column(Float, nullable=True)
+
 
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
