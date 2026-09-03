@@ -181,6 +181,12 @@ class BotParameters(Base):
     conversation_ratio = Column(Float, default=0.4)
     surprise_task_chance = Column(Float, default=0.15)
     stale_location_hours = Column(Integer, default=4)
+    
+    # Night mode params (NEW)
+    night_mode_enabled = Column(Boolean, default=True)
+    night_mode_start = Column(Integer, default=20)
+    night_mode_end = Column(Integer, default=8)
+    
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -213,6 +219,7 @@ class UserState(Base):
     rest_day_until = Column(DateTime, nullable=True)
     current_location = Column(String, default=LocationType.UNKNOWN.value)
     last_location_update = Column(DateTime, nullable=True)
+    location_detail = Column(Text, nullable=True)  # NEW: Specific location details
 
 
 class Task(Base):
@@ -233,8 +240,9 @@ class Task(Base):
     is_extended_hold = Column(Boolean, default=False)
     location_type = Column(String, default=LocationType.UNKNOWN.value)
     difficulty = Column(String, default=IntensityLevel.HIGH.value)
-    ai_verified = Column(Boolean, default=False)  # NEW: AI verification status
-    ai_analysis = Column(Text, nullable=True)  # NEW: AI analysis text
+    ai_verified = Column(Boolean, default=False)
+    ai_analysis = Column(Text, nullable=True)
+    ai_generated = Column(Boolean, default=False)  # NEW
 
 
 class TaskCheckIn(Base):
@@ -384,7 +392,7 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
                 "Content-Type": "application/json",
             },
             json={
-                "model": "claude-opus-5",
+                "model": "llama-3.3-70b",  # Using text model with image
                 "messages": [
                     {
                         "role": "user",
@@ -481,6 +489,172 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
             "moderate_matches": 0,
             "failure_matches": 0
         }
+
+
+# ============================================================================
+# AI TASK GENERATION (NEW)
+# ============================================================================
+
+async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
+    """Generate AI task based on user's actual specific situation"""
+    
+    # Gather context
+    location = user.current_location or "unknown"
+    location_detail = user.location_detail or ""
+    time_of_day = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain
+    intensity = user.intensity
+    streak = user.current_streak
+    
+    # Get recent tasks to avoid repetition
+    recent_tasks = db.query(Task).filter(
+        Task.user_id == user.id
+    ).order_by(desc(Task.created_at)).limit(5).all()
+    
+    recent_descriptions = [t.description[:100] for t in recent_tasks]
+    
+    # Determine time period
+    if 5 <= time_of_day < 12:
+        time_period = "morning"
+    elif 12 <= time_of_day < 17:
+        time_period = "afternoon"
+    elif 17 <= time_of_day < 22:
+        time_period = "evening"
+    else:
+        time_period = "night"
+    
+    # Build context-rich prompt
+    context = f"""You are a dominant AI creating a specific BDSM task for a submissive.
+
+SUBMISSIVE'S CURRENT SITUATION:
+- Location type: {location}
+- Specific location details: {location_detail if location_detail else "Not specified - ask them to be more specific with /location"}
+- Time of day: {time_period} ({time_of_day}:00 Mountain Time)
+- Current intensity level: {intensity}
+- Task streak: {streak} completed
+- Recent tasks: {recent_descriptions}
+
+TASK REQUIREMENTS:
+1. Must be completable RIGHT NOW at their specific location
+2. Must require photo proof
+3. Must match their {intensity} intensity level
+4. Be extremely specific using their actual surroundings (furniture, rooms, objects)
+5. Do NOT suggest going somewhere else - use where they ARE
+6. Make it creative, challenging, and contextual
+7. Include specific instructions about position, state of dress, and photo angle
+
+EXAMPLES OF GOOD CONTEXTUAL TASKS:
+
+Home bedroom at night:
+"Strip completely naked. Lie on your bed with your head hanging off the edge, legs spread wide. Take a photo from the doorway showing your vulnerable position and the bed. You have 12 minutes."
+
+Work office alone:
+"Close your office door. Strip from waist down. Bend over your desk with your bare ass toward the door. Photo from behind showing your clothes on the chair. 10 minutes."
+
+Car in parking lot:
+"Park in a corner spot. Strip naked in driver's seat. Photo showing steering wheel, your naked lap, and the parking lot visible through windshield. Quick before someone walks by."
+
+Home bathroom:
+"Strip naked. Kneel in bathtub facing the faucet. Photo from bathroom doorway showing your back and the tub. Stay kneeling until I release you."
+
+NOW CREATE A SPECIFIC TASK FOR THIS SUBMISSIVE'S EXACT SITUATION:
+
+Task description (be specific and commanding):"""
+    
+    # Generate with AI
+    try:
+        ai_description = generate_ai_response(user, context, db)
+        
+        # Clean up the response
+        ai_description = ai_description.strip()
+        
+        # Ensure photo requirement is mentioned
+        if "photo" not in ai_description.lower():
+            ai_description += "\n\nPhoto proof required."
+        
+        # Determine if extended hold based on content
+        is_extended_hold = any(phrase in ai_description.lower() for phrase in 
+            ["until i say", "do not move", "hold position", "stay there", "wait for", "kneel until"])
+        
+        return {
+            "description": ai_description,
+            "task_type": f"ai_{location}",
+            "requires_photo": True,
+            "is_extended_hold": is_extended_hold,
+            "location_type": location,
+            "difficulty": intensity,
+            "ai_generated": True,
+        }
+        
+    except Exception as e:
+        logger.error(f"AI task generation failed: {e}")
+        # Fall back to template
+        return generate_template_task(user, location, db)
+
+
+def generate_template_task(user: UserState, location: LocationType, db: Session) -> dict:
+    """Fallback template task generation"""
+    templates = {
+        LocationType.HOME: [
+            "Strip naked in your bedroom. Kneel facing the wall, hands behind back. Photo from doorway showing your obedience.",
+            "Completely naked in front of your bathroom mirror. Write 'PROPERTY' on your chest. Photo showing reflection.",
+            "Lie naked on your bed, legs spread, photo from foot of bed showing full vulnerability.",
+        ],
+        LocationType.WORK: [
+            "Office bathroom: strip naked, photo showing work ID or company logo visible.",
+            "Under your desk: pants down, hand on yourself, photo showing computer screen.",
+        ],
+        LocationType.PUBLIC: [
+            "Nearest fitting room: strip naked, photo showing clothes on hook and your reflection.",
+            "Public restroom: naked selfie showing stall door or bathroom sign visible.",
+        ],
+        LocationType.TRANSIT: [
+            "Your car: pull over in secluded spot, strip naked, photo showing steering wheel and road.",
+            "Parking garage: naked in back seat, photo showing level sign through window.",
+        ],
+        LocationType.UNKNOWN: [
+            "Wherever you are: strip to underwear, kneel, photo showing your surroundings.",
+        ]
+    }
+    
+    loc_templates = templates.get(location, templates[LocationType.UNKNOWN])
+    template = random.choice(loc_templates)
+    timeout = user.parameters.task_timeout_minutes
+    
+    return {
+        "description": template.format(timeout=timeout),
+        "task_type": location.value,
+        "requires_photo": True,
+        "is_extended_hold": False,
+        "location_type": location.value,
+        "difficulty": user.intensity,
+        "ai_generated": False,
+    }
+
+
+async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
+    """Intelligently choose between AI or template task"""
+    params = user.parameters
+    
+    # Use AI if:
+    # 1. User has provided specific location details
+    # 2. High streak (deserves custom tasks)
+    # 3. Random chance (40%)
+    # 4. User is at home or work (easier to be specific)
+    
+    has_details = user.location_detail and len(user.location_detail) > 3
+    high_streak = user.current_streak >= 5
+    good_location = user.current_location in [LocationType.HOME.value, LocationType.WORK.value]
+    random_chance = random.random() < 0.4
+    
+    use_ai = has_details or (high_streak and good_location) or random_chance
+    
+    if use_ai:
+        logger.info(f"Generating AI task for user {user.chat_id}")
+        return await generate_contextual_ai_task(user, db)
+    else:
+        logger.info(f"Using template task for user {user.chat_id}")
+        location = LocationType(user.current_location) if user.current_location else LocationType.HOME
+        return generate_template_task(user, location, db)
 
 
 # ============================================================================
@@ -702,113 +876,6 @@ class AvatarGenerator:
             return AvatarMood.DOMINANT
         else:
             return random.choice([AvatarMood.COMMANDING, AvatarMood.THOUGHTFUL])
-
-
-# ============================================================================
-# EXTREME TASK TEMPLATES
-# ============================================================================
-
-EXTREME_TASK_TEMPLATES = {
-    LocationType.WORK: [
-        "Go to your office bathroom. Strip completely naked. Take a photo showing your work ID badge visible. You have {timeout} minutes.",
-        "At your desk, hand down your pants, take a photo showing your computer screen with work visible. Quick.",
-        "Find an empty conference room. Strip naked. Photo showing the conference table. {timeout} minutes.",
-        "Go to the work parking garage. Find a corner. Drop pants to ankles. Photo from behind showing cars. {timeout} minutes.",
-        "In your cubicle, pants unzipped, hand inside, photo showing cubicle walls. Risky. {timeout} minutes.",
-        "Office kitchen: bend over with pants down, photo showing the coffee machine. Quick before someone comes.",
-        "Stairwell at work: every floor, remove one item of clothing. Photo at bottom floor naked.",
-        "Work bathroom mirror: write 'OWNED' on chest, photo with work logo visible in reflection.",
-        "Under your desk: pull pants down, photo showing view from under desk looking out.",
-        "Elevator at work: stop between floors, strip, photo showing elevator buttons and emergency panel.",
-    ],
-    LocationType.HOME: [
-        "Strip naked. Kneel facing a wall. Do not move until I release you. Photo proof of position. Check-ins will follow.",
-        "Edge yourself to the brink. Stop. Hold the position. Photo of your state. Do not finish until I say.",
-        "Naked, on all fours, forehead to floor. Photo proof. Stay. I will check on you.",
-        "Stand in the corner, naked, nose touching wall. Photo showing your back. Hold position until released.",
-        "Naked, hands behind back, kneeling on hard floor. Photo proof. Suffer for me.",
-        "In front of a window facing the street: naked, photo showing window view. Risky.",
-        "On your balcony or porch: completely naked, photo showing house number or mailbox.",
-        "Living room: naked, legs spread, photo showing front door in background.",
-        "Kitchen: naked, bent over counter, photo showing stove/oven visible.",
-        "Bedroom: tied or holding position, photo showing clock/time for duration proof.",
-    ],
-    LocationType.PUBLIC: [
-        "Mall fitting room: strip naked, photo showing clothes on hanger and your naked reflection.",
-        "Public library bathroom: naked, photo showing books or library sign visible.",
-        "Coffee shop bathroom: strip, photo showing coffee cup or shop logo.",
-        "Gym locker room: naked, photo showing locker number and your reflection.",
-        "Movie theater bathroom: naked, photo showing movie poster visible.",
-        "Restaurant bathroom: strip, photo showing menu or receipt visible.",
-        "Bar/club bathroom: naked, photo showing graffiti or mirror message.",
-        "Hotel hallway: naked, quick photo showing room numbers.",
-        "Parking garage: naked, photo showing level sign and parked cars.",
-        "Park restroom: naked, photo showing park map or sign visible.",
-    ],
-    LocationType.TRANSIT: [
-        "Your car: pull over, strip naked, photo showing steering wheel and road visible through window.",
-        "Public bus: back seat, hand down pants, photo showing bus window and seats.",
-        "Train/subway: bathroom or corner, pants down, photo showing train interior.",
-        "Uber/taxi: back seat, exposed, photo showing driver's seat or dashboard.",
-        "Highway rest stop: bathroom, naked, photo showing highway sign or map.",
-        "Airport bathroom: strip, photo showing gate number or terminal sign.",
-        "Parking lot: in your car, naked, photo showing store signs visible.",
-        "Gas station: bathroom, naked, photo showing gas pump visible through window.",
-    ],
-    LocationType.SOCIAL: [
-        "Friend's house bathroom: naked, photo showing their towels or decor.",
-        "Party bathroom: strip, photo showing party decorations visible.",
-        "Family gathering: bathroom, risky exposure, photo showing family photos in background.",
-        "Date's place: bathroom, naked, photo showing their personal items.",
-        "Public event: portable toilet, strip, photo showing event flyer or ticket.",
-    ],
-}
-
-# Check-in messages
-CHECK_IN_MESSAGES = {
-    "demand_status": [
-        "Still waiting. Send me a photo proving you haven't moved.",
-        "Check-in. Photo. Now. Prove you're still obeying.",
-        "I want to see you still in position. Photo proof required.",
-        "Time check. Where's my proof you're still being good?",
-        "Don't move. But send me a photo showing me you haven't.",
-    ],
-    "escalate_position": [
-        "Good. Now spread your legs wider. Photo proof.",
-        "Stay there. But now I want you to add: hands behind back. Photo.",
-        "Hold position. Additionally: I want to see your face showing your suffering. Photo.",
-        "You're doing well. Make it harder: arch your back more. Photo proof.",
-        "Maintain position. New requirement: I want to hear you beg in the next photo's caption.",
-    ],
-    "mock_suffering": [
-        "Are your knees hurting? Good. Send proof you're still there.",
-        "How long has it been? Doesn't matter. You'll wait longer. Photo.",
-        "I bet you want to move. Don't. Photo proof of obedience.",
-        "Your suffering pleases me. Show me more. Photo.",
-        "Still there? I'm impressed. Now suffer more for me. Photo.",
-    ],
-    "release_commands": [
-        "You've suffered enough. You may move. Send one final photo of your state.",
-        "Released. But first: photo proof of what I did to you.",
-        "You may stop. After you send me a photo showing the result.",
-        "Task complete. One last photo required for my satisfaction.",
-        "You're free. But I want to see the evidence of your obedience first. Photo.",
-    ],
-}
-
-# Conversation starters (non-task)
-CONVERSATION_PROMPTS = [
-    "How is my pet feeling today? Tell me honestly.",
-    "What have you been thinking about since we last spoke?",
-    "I want to know what you're wearing right now. Describe it.",
-    "Tell me about your day. I want details.",
-    "Are you alone right now? Be honest.",
-    "What's something you've been too shy to tell me?",
-    "How do you feel when you obey me? Describe it.",
-    "Tell me about a time you felt truly owned.",
-    "What are you doing right now, exact position?",
-    "I want to know your thoughts. Speak freely, pet.",
-]
 
 
 # ============================================================================
@@ -1208,12 +1275,23 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
 
 def generate_conversation_response(user: UserState, db: Session) -> str:
     """Generate a non-task conversation response"""
-    prompt = random.choice(CONVERSATION_PROMPTS)
+    prompt = random.choice([
+        "How is my pet feeling today? Tell me honestly.",
+        "What have you been thinking about since we last spoke?",
+        "I want to know what you're wearing right now. Describe it.",
+        "Tell me about your day. I want details.",
+        "Are you alone right now? Be honest.",
+        "What's something you've been too shy to tell me?",
+        "How do you feel when you obey me? Describe it.",
+        "Tell me about a time you felt truly owned.",
+        "What are you doing right now, exact position?",
+        "I want to know your thoughts. Speak freely, pet.",
+    ])
     return generate_ai_response(user, prompt, db)
 
 
 # ============================================================================
-# TASK GENERATION
+# TASK GENERATION UTILITIES
 # ============================================================================
 
 def check_understanding_mode(user_message: str) -> bool:
@@ -1227,45 +1305,8 @@ def check_understanding_mode(user_message: str) -> bool:
     return any(indicator in msg_lower for indicator in refusal_indicators)
 
 
-def generate_task_for_location(user: UserState, location: LocationType, db: Session) -> dict:
-    """Generate location-appropriate task"""
-    templates = EXTREME_TASK_TEMPLATES.get(location, EXTREME_TASK_TEMPLATES[LocationType.PUBLIC])
-    
-    # Filter by intensity
-    if user.intensity == IntensityLevel.EXTREME.value:
-        # Use all templates
-        pass
-    elif user.intensity == IntensityLevel.HIGH.value:
-        # Skip most extreme (first few of each category are most extreme)
-        templates = templates[3:] if len(templates) > 3 else templates
-    elif user.intensity == IntensityLevel.MEDIUM.value:
-        # Use milder half
-        templates = templates[len(templates)//2:]
-    else:
-        # Low intensity - use last few (mildest)
-        templates = templates[-3:] if len(templates) > 3 else templates
-    
-    template = random.choice(templates)
-    timeout = user.parameters.task_timeout_minutes
-    
-    description = template.format(timeout=timeout)
-    
-    # Determine if extended hold
-    is_extended_hold = "until I release" in description.lower() or "do not move" in description.lower()
-    
-    return {
-        "description": description,
-        "task_type": location.value,
-        "requires_photo": True,
-        "is_extended_hold": is_extended_hold,
-        "location_type": location.value,
-        "difficulty": user.intensity,
-    }
-
-
 def offer_alternative_task(user: UserState, original_task: Task, db: Session) -> dict:
     """Offer milder alternative with punishment"""
-    # Reduce intensity for alternative
     alternatives = [
         "Strip to underwear only (not naked) and take photo in mirror.",
         "Edge once but do not finish. Photo of your face showing frustration.",
@@ -1283,7 +1324,7 @@ def offer_alternative_task(user: UserState, original_task: Task, db: Session) ->
         "is_extended_hold": False,
         "location_type": original_task.location_type,
         "difficulty": IntensityLevel.HIGH.value,
-        "is_alternative": True,
+        "ai_generated": False,
     }
 
 
@@ -1328,15 +1369,33 @@ async def send_checkin_message(user: UserState, task: Task, message_type: str, c
             return
         
         if message_type == "release":
-            messages = CHECK_IN_MESSAGES["release_commands"]
+            messages = [
+                "You've suffered enough. You may move. Send one final photo of your state.",
+                "Released. But first: photo proof of what I did to you.",
+                "You may stop. After you send me a photo showing the result.",
+                "Task complete. One last photo required for my satisfaction.",
+                "You're free. But I want to see the evidence of your obedience first. Photo.",
+            ]
             mood = AvatarMood.PLEASED if user.consecutive_failures == 0 else AvatarMood.COMMANDING
             current_task.status = TaskStatus.IN_PROGRESS.value
             db.commit()
         elif message_type == "escalate":
-            messages = CHECK_IN_MESSAGES["escalate_position"]
+            messages = [
+                "Good. Now spread your legs wider. Photo proof.",
+                "Stay there. But now I want you to add: hands behind back. Photo.",
+                "Hold position. Additionally: I want to see your face showing your suffering. Photo.",
+                "You're doing well. Make it harder: arch your back more. Photo proof.",
+                "Maintain position. New requirement: I want to hear you beg in the next photo's caption.",
+            ]
             mood = AvatarMood.DEMANDING
         else:
-            messages = CHECK_IN_MESSAGES["demand_status"]
+            messages = [
+                "Still waiting. Send me a photo proving you haven't moved.",
+                "Check-in. Photo. Now. Prove you're still obeying.",
+                "I want to see you still in position. Photo proof required.",
+                "Time check. Where's my proof you're still being good?",
+                "Don't move. But send me a photo showing me you haven't.",
+            ]
             mood = AvatarMood.SUSPICIOUS
         
         message = random.choice(messages)
@@ -1427,18 +1486,19 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         user = get_or_create_user(db, str(update.effective_chat.id))
         params = user.parameters
         
-        # Night mode check (8pm-8am Mountain) - FIXED
-        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-        if current_hour >= 20 or current_hour < 8:
-            # Night mode - conversation only, no tasks
-            if update.message.text:
-                user_msg = ConversationMessage(user_id=user.id, message=update.message.text, is_from_dom=False)
-                db.add(user_msg)
-                db.commit()
-                
-                ai_response = generate_ai_response(user, update.message.text, db)
-                await update.message.reply_text(f"🌙 Night Mode 🌙\n\n{ai_response}\n\n(Sleep well, pet. Tasks resume at 8am)")
-            return
+        # Night mode check (user-configurable)
+        if params.night_mode_enabled:
+            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+                # Night mode - conversation only, no tasks
+                if update.message.text:
+                    user_msg = ConversationMessage(user_id=user.id, message=update.message.text, is_from_dom=False)
+                    db.add(user_msg)
+                    db.commit()
+                    
+                    ai_response = generate_ai_response(user, update.message.text, db)
+                    await update.message.reply_text(f"🌙 Night Mode 🌙\n\n{ai_response}\n\n(Sleep well, pet. Tasks resume at {params.night_mode_end}am)")
+                return
         
         # Safe word check
         if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
@@ -1519,7 +1579,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             return
         
         # Determine: conversation or task?
-        # 40% conversation, 60% task (configurable)
         is_conversation = random.random() < params.conversation_ratio
         
         if is_conversation and not is_command:
@@ -1549,18 +1608,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 await update.message.reply_text(ai_response)
             return
         
-        # Task mode
-        location = LocationType(user.current_location) if user.current_location else LocationType.UNKNOWN
-        
-        # Surprise task chance
-        is_surprise = random.random() < params.surprise_task_chance
-        
-        task_data = generate_task_for_location(user, location, db)
+        # Task mode - USE SMART AI TASK GENERATION
+        task_data = await get_smart_task_for_user(user, db)
         
         # Create task
         deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
-        if is_surprise:
-            deadline = datetime.utcnow() + timedelta(minutes=5)  # 5 min for surprise
         
         task = Task(
             user_id=user.id,
@@ -1570,7 +1622,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             intensity=task_data["difficulty"],
             deadline=deadline,
             is_extended_hold=task_data.get("is_extended_hold", False),
-            location_type=task_data.get("location_type", location.value),
+            location_type=task_data.get("location_type", user.current_location),
+            ai_generated=task_data.get("ai_generated", False),
         )
         db.add(task)
         db.commit()
@@ -1587,12 +1640,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         ]
         
         # Determine mood
-        if is_surprise:
-            mood = AvatarMood.EXHIBITIONIST
-            prefix = "🚨 SURPRISE TASK 🚨\n\n"
-        elif task_data["location_type"] in ["work", "public"]:
-            mood = AvatarMood.EXHIBITIONIST
-            prefix = ""
+        if task_data.get("ai_generated"):
+            mood = AvatarMood.COMMANDING
+            prefix = "🤖 AI-GENERATED TASK\n\n"
         elif task_data.get("is_extended_hold"):
             mood = AvatarMood.DEMANDING
             prefix = ""
@@ -1602,7 +1652,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
         
-        full_message = f"{prefix}📋 YOUR TASK:\n{task_data['description']}\n\n⏰ Deadline: {'5 minutes' if is_surprise else str(params.task_timeout_minutes) + ' minutes'}\n\n📸 PHOTO PROOF REQUIRED"
+        full_message = f"{prefix}📋 YOUR TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
         
         dom_msg = ConversationMessage(
             user_id=user.id,
@@ -1632,7 +1682,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         # Schedule escalation check
         scheduler.add_job(
             lambda: asyncio.run(check_escalation_wrapper(str(update.effective_chat.id))),
-            trigger=IntervalTrigger(minutes=5 if is_surprise else params.task_timeout_minutes),
+            trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
             id=f"escalation_check_{update.effective_chat.id}",
             replace_existing=True,
         )
@@ -1831,7 +1881,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.current_location = new_loc.value
             user.last_location_update = datetime.utcnow()
             db.commit()
-            await query.edit_message_text(f"📍 Location updated: {new_loc.value}\n\nAwaiting my command...")
+            
+            # Ask for specific details
+            await query.edit_message_text(
+                f"📍 Location updated: {new_loc.value}\n\n"
+                f"Be more specific for better tasks:\n"
+                f"Send: /locationdetail bedroom\n"
+                f"Or: /locationdetail 'office alone'\n"
+                f"Or: /locationdetail 'car in parking lot'"
+            )
             return
         
         # AVATAR HANDLERS
@@ -1994,11 +2052,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = """Welcome, pet. I am your Dom.
 
 I learn. I adapt. I reward. I punish.
-I VERIFY. My AI watches your proof.
+I VERIFY with AI. My intelligence creates tasks for YOUR specific situation.
 
 Commands:
 /status - Your standing
 /location - Set your current location
+/locationdetail - Be specific (e.g., "bedroom", "office alone")
+/nightmode - Toggle or customize night mode
 /rewards - View your progress & milestones
 /redeem - Spend points on rewards
 /selfie - Request my image
@@ -2019,16 +2079,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user.completed_tasks / user.total_tasks * 100) if user.total_tasks > 0 else 0
         )
         location_str = user.current_location if user.current_location else "Unknown"
+        location_detail = f" ({user.location_detail})" if user.location_detail else ""
         
         text = f"""
 📊 Your Status, pet
 
 Intensity: {user.intensity.upper()}
-Location: {location_str}
+Location: {location_str}{location_detail}
 Tasks: {user.completed_tasks}/{user.total_tasks} ({compliance:.0f}%)
 Current Streak: 🔥 {user.current_streak} tasks
 Longest Streak: {user.longest_streak} tasks
 Reward Points: ⭐ {user.reward_points}
+
+AI Task Generation: {'Enabled' if user.location_detail else 'Set /locationdetail for better tasks'}
 
 Privileges: {', '.join(user.privileges) if user.privileges else 'None yet'}
 
@@ -2049,9 +2112,109 @@ async def location_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🎉 Social", callback_data="loc_social")],
     ]
     await update.message.reply_text(
-        "📍 Where are you right now, pet?",
+        "📍 Where are you right now, pet?\n\n"
+        "After selecting, use /locationdetail to be more specific\n"
+        "(e.g., 'bedroom', 'office alone', 'car in parking lot')",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+async def location_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set specific location details for contextual AI tasks"""
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        if not context.args:
+            current = user.location_detail or "Not set"
+            await update.message.reply_text(
+                f"Current location detail: {current}\n\n"
+                f"Be specific so my AI can create contextual tasks:\n"
+                f"Examples:\n"
+                f"• /locationdetail bedroom\n"
+                f"• /locationdetail 'home office alone'\n"
+                f"• /locationdetail 'work bathroom'\n"
+                f"• /locationdetail 'car in parking garage'\n"
+                f"• /locationdetail 'Starbucks bathroom'"
+            )
+            return
+        
+        detail = " ".join(context.args)
+        user.location_detail = detail
+        db.commit()
+        
+        await update.message.reply_text(
+            f"📍 Location detail updated: {detail}\n\n"
+            f"My AI will now create tasks specific to this location!\n"
+            f"Next task will use: '{detail}'"
+        )
+    finally:
+        db.close()
+
+
+async def nightmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle night mode on/off"""
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        params = user.parameters
+        
+        if not context.args:
+            status = "ON" if params.night_mode_enabled else "OFF"
+            await update.message.reply_text(
+                f"🌙 Night mode: {status}\n"
+                f"Hours: {params.night_mode_start}:00 - {params.night_mode_end}:00 Mountain\n\n"
+                f"Commands:\n"
+                f"/nightmode on\n"
+                f"/nightmode off\n"
+                f"/nightmode setstart 22 (10pm)\n"
+                f"/nightmode setend 6 (6am)"
+            )
+            return
+        
+        action = context.args[0].lower()
+        
+        if action == "on":
+            params.night_mode_enabled = True
+            db.commit()
+            await update.message.reply_text(
+                f"🌙 Night mode ENABLED.\n"
+                f"No tasks from {params.night_mode_start}:00 to {params.night_mode_end}:00"
+            )
+            
+        elif action == "off":
+            params.night_mode_enabled = False
+            db.commit()
+            await update.message.reply_text("☀️ Night mode DISABLED. Tasks anytime.")
+            
+        elif action == "setstart" and len(context.args) > 1:
+            try:
+                hour = int(context.args[1])
+                if 0 <= hour <= 23:
+                    params.night_mode_start = hour
+                    db.commit()
+                    await update.message.reply_text(f"Night mode now starts at {hour}:00")
+                else:
+                    await update.message.reply_text("Hour must be 0-23")
+            except ValueError:
+                await update.message.reply_text("Use: /nightmode setstart 22")
+                
+        elif action == "setend" and len(context.args) > 1:
+            try:
+                hour = int(context.args[1])
+                if 0 <= hour <= 23:
+                    params.night_mode_end = hour
+                    db.commit()
+                    await update.message.reply_text(f"Night mode now ends at {hour}:00")
+                else:
+                    await update.message.reply_text("Hour must be 0-23")
+            except ValueError:
+                await update.message.reply_text("Use: /nightmode setend 6")
+        else:
+            await update.message.reply_text("Unknown command. Use: /nightmode on/off/setstart/setend")
+            
+    finally:
+        db.close()
 
 
 async def rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2339,23 +2502,24 @@ def schedule_next_message():
     user = get_or_create_user(db, USER_CHAT_ID)
     params = user.parameters
     
-    # Check night mode (Mountain Time)
-    current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-    if current_hour >= 20 or current_hour < 8:
-        # Schedule for 8am Mountain = 3pm UTC
-        next_time = datetime.utcnow().replace(hour=15, minute=0, second=0)
-        if current_hour >= 20:
-            next_time += timedelta(days=1)
-        
-        scheduler.add_job(
-            lambda: asyncio.run(send_scheduled_dom_message()),
-            trigger="date",
-            run_date=next_time,
-            id="dom_message",
-            replace_existing=True,
-        )
-        logger.info(f"Night mode active. Next message at 8am Mountain.")
-        return
+    # Check night mode (user-configurable)
+    if params.night_mode_enabled:
+        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+        if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+            # Schedule for end of night mode
+            next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0, second=0)
+            if current_hour >= params.night_mode_start:
+                next_time += timedelta(days=1)
+            
+            scheduler.add_job(
+                lambda: asyncio.run(send_scheduled_dom_message()),
+                trigger="date",
+                run_date=next_time,
+                id="dom_message",
+                replace_existing=True,
+            )
+            logger.info(f"Night mode active. Next message at {params.night_mode_end}:00.")
+            return
     
     minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
     scheduler.add_job(
@@ -2374,10 +2538,11 @@ async def send_scheduled_dom_message():
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # Night mode check (Mountain Time)
-        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-        if current_hour >= 20 or current_hour < 8:
-            return
+        # Night mode check (user-configurable)
+        if params.night_mode_enabled:
+            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+                return
         
         if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
             return
@@ -2409,9 +2574,8 @@ async def send_scheduled_dom_message():
         is_task = random.random() > params.conversation_ratio
         
         if is_task:
-            # Generate task
-            location = LocationType(user.current_location) if user.current_location else LocationType.PUBLIC
-            task_data = generate_task_for_location(user, location, db)
+            # Generate task using SMART AI
+            task_data = await get_smart_task_for_user(user, db)
             
             deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
             task = Task(
@@ -2422,7 +2586,8 @@ async def send_scheduled_dom_message():
                 intensity=task_data["difficulty"],
                 deadline=deadline,
                 is_extended_hold=task_data.get("is_extended_hold", False),
-                location_type=task_data.get("location_type", location.value),
+                location_type=task_data.get("location_type", user.current_location),
+                ai_generated=task_data.get("ai_generated", False),
             )
             db.add(task)
             db.commit()
@@ -2440,7 +2605,8 @@ async def send_scheduled_dom_message():
             mood = AvatarMood.COMMANDING
             image_data = AvatarGenerator.generate_avatar(user, mood, db)
             
-            full_message = f"📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
+            ai_badge = "🤖 " if task_data.get("ai_generated") else ""
+            full_message = f"{ai_badge}📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
             
             dom_msg = ConversationMessage(
                 user_id=user.id,
@@ -2533,6 +2699,8 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("location", location_command))
+    application.add_handler(CommandHandler("locationdetail", location_detail_command))
+    application.add_handler(CommandHandler("nightmode", nightmode_command))
     application.add_handler(CommandHandler("rewards", rewards_command))
     application.add_handler(CommandHandler("redeem", redeem_command))
     application.add_handler(CommandHandler("selfie", selfie_command))
@@ -2548,7 +2716,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v2.0 with AI Verification started. I am watching...")
+    logger.info("Dom Bot v3.0 with AI Task Generation started. I am watching...")
     application.run_polling()
 
 
