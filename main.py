@@ -137,7 +137,6 @@ class BotParameters(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("user_states.id"), unique=True)
     
-    # Existing params
     learning_enabled = Column(Boolean, default=True)
     analysis_frequency = Column(Integer, default=5)
     adaptation_rate = Column(Float, default=0.3)
@@ -161,7 +160,6 @@ class BotParameters(Base):
     avatar_enabled = Column(Boolean, default=True)
     avatar_frequency = Column(Float, default=0.7)
     
-    # Enhanced avatar params
     avatar_style = Column(String, default="photorealistic")
     avatar_ethnicity = Column(String, default="mixed")
     avatar_nationality = Column(String, default="mediterranean")
@@ -171,7 +169,6 @@ class BotParameters(Base):
     avatar_hair_color = Column(String, default="black")
     avatar_age_appearance = Column(String, default="28")
     
-    # Task system params
     rewards_enabled = Column(Boolean, default=True)
     reward_frequency = Column(Float, default=0.1)
     check_in_frequency = Column(Integer, default=3)
@@ -182,7 +179,6 @@ class BotParameters(Base):
     surprise_task_chance = Column(Float, default=0.15)
     stale_location_hours = Column(Integer, default=4)
     
-    # Night mode params (NEW)
     night_mode_enabled = Column(Boolean, default=True)
     night_mode_start = Column(Integer, default=20)
     night_mode_end = Column(Integer, default=8)
@@ -219,7 +215,7 @@ class UserState(Base):
     rest_day_until = Column(DateTime, nullable=True)
     current_location = Column(String, default=LocationType.UNKNOWN.value)
     last_location_update = Column(DateTime, nullable=True)
-    location_detail = Column(Text, nullable=True)  # NEW: Specific location details
+    location_detail = Column(Text, nullable=True)
 
 
 class Task(Base):
@@ -242,7 +238,7 @@ class Task(Base):
     difficulty = Column(String, default=IntensityLevel.HIGH.value)
     ai_verified = Column(Boolean, default=False)
     ai_analysis = Column(Text, nullable=True)
-    ai_generated = Column(Boolean, default=False)  # NEW
+    ai_generated = Column(Boolean, default=False)
 
 
 class TaskCheckIn(Base):
@@ -346,13 +342,24 @@ def get_or_create_user(db: Session, chat_id: str):
 
 
 # ============================================================================
-# AI PHOTO VERIFICATION
+# HELPER FUNCTIONS
 # ============================================================================
 
-async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
-    """AI verification of photo proof using Venice AI"""
+def truncate_for_telegram(text: str, max_length: int = 950) -> str:
+    """Truncate text to fit Telegram's caption limit"""
+    if len(text) <= max_length:
+        return text
+    return text[:max_length-3] + "..."
+
+
+# ============================================================================
+# CLAUDE-3 OPUS VERIFICATION THROUGH VENICE
+# ============================================================================
+
+async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
+    """Verify photo using Claude-3-Opus through Venice AI"""
     
-    # Upload to Cloudinary first (for storage and URL)
+    # Upload to Cloudinary
     cloudinary_url = None
     try:
         upload_result = cloudinary.uploader.upload(
@@ -362,28 +369,39 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
             resource_type="auto"
         )
         cloudinary_url = upload_result.get('secure_url')
-        logger.info(f"Photo uploaded to Cloudinary: {cloudinary_url}")
+        logger.info(f"Photo uploaded: {cloudinary_url}")
     except Exception as e:
         logger.error(f"Cloudinary upload failed: {e}")
     
-    # Convert bytes to base64 for Venice vision
+    # Convert to base64 for Claude vision
     photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
     
-    # Build verification prompt based on task type
-    task_type = task.task_type or "general"
-    verification_prompts = {
-        "public_exposure": "Analyze this photo carefully. Is the person naked or exposing themselves in a public/semi-public setting (bathroom, fitting room, parking garage, etc.)? Describe exactly what you see: location type, clothing state, pose, surroundings, and any identifying features. Be specific and detailed.",
-        "home": "Analyze this photo carefully. Is the person naked or in a submissive pose at home? Describe: exact position, clothing state, room setting, furniture visible, and whether they appear to be holding position obediently.",
-        "work": "Analyze this photo carefully. Is this an office/work setting? Is the person exposing themselves or in a risky position at work? Describe: exact location (desk, bathroom, conference room), clothing state, risk level of getting caught.",
-        "transit": "Analyze this photo carefully. Is the person in a vehicle or public transit? Are they exposed or in a risky position? Describe: location (car, bus, train), clothing state, visibility to others.",
-        "extended_hold": "Analyze this photo carefully. Is the person maintaining a static position (kneeling, hands behind back, forehead to floor, etc.)? Describe: exact pose, stillness, environment, suffering/obedience visible.",
-        "social": "Analyze this photo carefully. Is the person at a social gathering or someone else's home? Are they exposed or in a risky position? Describe: location type, clothing state, risk of being discovered.",
-        "general": "Analyze this photo carefully. Is the person obeying what appears to be a dominant command? Describe: nudity level, exact pose, location setting, and evidence of obedience.",
-    }
-    
-    prompt = verification_prompts.get(task_type, verification_prompts["general"])
-    
-    # Call Venice AI with vision
+    # Build verification prompt
+    prompt = f"""You are verifying BDSM task completion. Analyze this photo carefully.
+
+TASK REQUIREMENTS:
+"{task.description}"
+
+USER CONTEXT:
+- Location type: {user.current_location}
+- Specific location: {user.location_detail or 'not specified'}
+- Intensity level: {user.intensity}
+- Time: {datetime.utcnow().strftime('%H:%M')} UTC
+
+ANALYSIS INSTRUCTIONS:
+1. Does the photo show the requested nudity/exposure level?
+2. Is the position/pose as commanded?
+3. Does the setting match the task location?
+4. Is there evidence of obedience/compliance?
+5. Any signs of faking or incorrect completion?
+
+Respond in this exact format:
+VERDICT: [VERIFIED or FAILED]
+CONFIDENCE: [high/medium/low]
+ANALYSIS: [Your detailed explanation of what you see]
+
+Be strict but fair. If they clearly attempted the task, verify it. If they're fully clothed in a "strip naked" task, fail it."""
+
     try:
         response = requests.post(
             VENICE_API_URL,
@@ -392,12 +410,15 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
                 "Content-Type": "application/json",
             },
             json={
-                "model": "claude-opus-5",  # Using text model with image
+                "model": "claude-3-opus-20240229",  # Claude-3-Opus through Venice
                 "messages": [
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": prompt},
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
                             {
                                 "type": "image_url",
                                 "image_url": {
@@ -407,112 +428,62 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
                         ]
                     }
                 ],
+                "max_tokens": 800,
                 "temperature": 0.2,
-                "max_tokens": 500,
             },
             timeout=60,
         )
         
         if response.status_code == 200:
-            analysis = response.json()["choices"][0]["message"]["content"]
+            result = response.json()
+            analysis = result["choices"][0]["message"]["content"]
             
-            # Determine if task is completed based on analysis
-            analysis_lower = analysis.lower()
-            
-            # Strong completion indicators
-            strong_completion = [
-                "naked", "nude", "completely naked", "fully exposed",
-                "kneeling", "on all fours", "forehead to floor",
-                "hands behind back", "legs spread", "bent over",
-                "exposed", "undressed", "bare", "no clothes"
-            ]
-            
-            # Moderate completion indicators
-            moderate_completion = [
-                "in position", "holding position", "obeying",
-                "submissive pose", "vulnerable position",
-                "public bathroom", "fitting room", "parking garage",
-                "at work", "office", "risky location"
-            ]
-            
-            # Failure indicators
-            failure_indicators = [
-                "fully clothed", "dressed", "wearing clothes",
-                "standing normally", "sitting normally",
-                "cannot determine", "unclear", "blurry",
-                "no person visible", "different person"
-            ]
-            
-            strong_score = sum(2 for ind in strong_completion if ind in analysis_lower)
-            moderate_score = sum(1 for ind in moderate_completion if ind in analysis_lower)
-            failure_score = sum(2 for ind in failure_indicators if ind in analysis_lower)
-            
-            total_score = strong_score + moderate_score - failure_score
-            
-            # Verification threshold
-            is_verified = total_score >= 2
-            
-            confidence = "high" if total_score >= 4 else "medium" if total_score >= 2 else "low"
+            # Parse verdict
+            is_verified = "VERIFIED" in analysis.upper() and "FAILED" not in analysis.upper()
+            confidence = "low"
+            if "high" in analysis.lower():
+                confidence = "high"
+            elif "medium" in analysis.lower():
+                confidence = "medium"
             
             return {
                 "verified": is_verified,
                 "analysis": analysis,
                 "cloudinary_url": cloudinary_url,
-                "score": total_score,
                 "confidence": confidence,
-                "strong_matches": strong_score // 2,
-                "moderate_matches": moderate_score,
-                "failure_matches": failure_score // 2
             }
         else:
-            logger.error(f"Venice API error: {response.status_code} - {response.text}")
+            logger.error(f"Claude API error: {response.status_code} - {response.text}")
             return {
                 "verified": False,
-                "analysis": f"AI analysis failed: HTTP {response.status_code}",
+                "analysis": f"API Error: {response.status_code}",
                 "cloudinary_url": cloudinary_url,
-                "score": 0,
                 "confidence": "none",
-                "strong_matches": 0,
-                "moderate_matches": 0,
-                "failure_matches": 0
             }
             
     except Exception as e:
-        logger.error(f"AI verification error: {e}")
+        logger.error(f"Claude verification error: {e}")
         return {
             "verified": False,
-            "analysis": f"Error during analysis: {str(e)}",
+            "analysis": f"Error: {str(e)}",
             "cloudinary_url": cloudinary_url,
-            "score": 0,
             "confidence": "none",
-            "strong_matches": 0,
-            "moderate_matches": 0,
-            "failure_matches": 0
         }
 
 
 # ============================================================================
-# AI TASK GENERATION (NEW)
+# AI TASK GENERATION
 # ============================================================================
 
 async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
-    """Generate AI task based on user's actual specific situation"""
+    """Generate AI task based on user's specific situation"""
     
-    # Gather context
     location = user.current_location or "unknown"
     location_detail = user.location_detail or ""
-    time_of_day = (datetime.utcnow() - timedelta(hours=7)).hour  # Mountain
+    time_of_day = (datetime.utcnow() - timedelta(hours=7)).hour
     intensity = user.intensity
-    streak = user.current_streak
     
-    # Get recent tasks to avoid repetition
-    recent_tasks = db.query(Task).filter(
-        Task.user_id == user.id
-    ).order_by(desc(Task.created_at)).limit(5).all()
-    
-    recent_descriptions = [t.description[:100] for t in recent_tasks]
-    
-    # Determine time period
+    # Time period
     if 5 <= time_of_day < 12:
         time_period = "morning"
     elif 12 <= time_of_day < 17:
@@ -522,56 +493,35 @@ async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
     else:
         time_period = "night"
     
-    # Build context-rich prompt
-    context = f"""You are a dominant AI creating a specific BDSM task for a submissive.
+    prompt = f"""Create a specific BDSM task (MAX 350 CHARACTERS).
 
-SUBMISSIVE'S CURRENT SITUATION:
-- Location type: {location}
-- Specific location details: {location_detail if location_detail else "Not specified - ask them to be more specific with /location"}
-- Time of day: {time_period} ({time_of_day}:00 Mountain Time)
-- Current intensity level: {intensity}
-- Task streak: {streak} completed
-- Recent tasks: {recent_descriptions}
+CONTEXT:
+- Location: {location} ({location_detail if location_detail else 'be specific with typical rooms/furniture'})
+- Time: {time_period}
+- Intensity: {intensity}
 
-TASK REQUIREMENTS:
-1. Must be completable RIGHT NOW at their specific location
-2. Must require photo proof
-3. Must match their {intensity} intensity level
-4. Be extremely specific using their actual surroundings (furniture, rooms, objects)
-5. Do NOT suggest going somewhere else - use where they ARE
-6. Make it creative, challenging, and contextual
-7. Include specific instructions about position, state of dress, and photo angle
+RULES:
+- Be extremely specific using actual surroundings
+- Use furniture, rooms, objects they have
+- Include exact position, dress state, photo angle
+- Max 350 characters - concise and commanding
+- Make it creatively challenging
 
-EXAMPLES OF GOOD CONTEXTUAL TASKS:
+Example good: "Strip naked in your bedroom. Kneel on the bed facing the wall. Photo from doorway showing your back and the room. 12 min."
 
-Home bedroom at night:
-"Strip completely naked. Lie on your bed with your head hanging off the edge, legs spread wide. Take a photo from the doorway showing your vulnerable position and the bed. You have 12 minutes."
+TASK:"""
 
-Work office alone:
-"Close your office door. Strip from waist down. Bend over your desk with your bare ass toward the door. Photo from behind showing your clothes on the chair. 10 minutes."
-
-Car in parking lot:
-"Park in a corner spot. Strip naked in driver's seat. Photo showing steering wheel, your naked lap, and the parking lot visible through windshield. Quick before someone walks by."
-
-Home bathroom:
-"Strip naked. Kneel in bathtub facing the faucet. Photo from bathroom doorway showing your back and the tub. Stay kneeling until I release you."
-
-NOW CREATE A SPECIFIC TASK FOR THIS SUBMISSIVE'S EXACT SITUATION:
-
-Task description (be specific and commanding):"""
-    
-    # Generate with AI
     try:
-        ai_description = generate_ai_response(user, context, db)
-        
-        # Clean up the response
+        ai_description = generate_ai_response(user, prompt, db)
         ai_description = ai_description.strip()
         
-        # Ensure photo requirement is mentioned
-        if "photo" not in ai_description.lower():
-            ai_description += "\n\nPhoto proof required."
+        # Enforce length
+        if len(ai_description) > 350:
+            ai_description = ai_description[:347] + "..."
         
-        # Determine if extended hold based on content
+        if "photo" not in ai_description.lower():
+            ai_description += " Photo proof."
+        
         is_extended_hold = any(phrase in ai_description.lower() for phrase in 
             ["until i say", "do not move", "hold position", "stay there", "wait for", "kneel until"])
         
@@ -587,177 +537,146 @@ Task description (be specific and commanding):"""
         
     except Exception as e:
         logger.error(f"AI task generation failed: {e}")
-        # Fall back to template
-        return generate_template_task(user, location, db)
-
-
-def generate_template_task(user: UserState, location: LocationType, db: Session) -> dict:
-    """Fallback template task generation"""
-    templates = {
-        LocationType.HOME: [
-            "Strip naked in your bedroom. Kneel facing the wall, hands behind back. Photo from doorway showing your obedience.",
-            "Completely naked in front of your bathroom mirror. Write 'PROPERTY' on your chest. Photo showing reflection.",
-            "Lie naked on your bed, legs spread, photo from foot of bed showing full vulnerability.",
-        ],
-        LocationType.WORK: [
-            "Office bathroom: strip naked, photo showing work ID or company logo visible.",
-            "Under your desk: pants down, hand on yourself, photo showing computer screen.",
-        ],
-        LocationType.PUBLIC: [
-            "Nearest fitting room: strip naked, photo showing clothes on hook and your reflection.",
-            "Public restroom: naked selfie showing stall door or bathroom sign visible.",
-        ],
-        LocationType.TRANSIT: [
-            "Your car: pull over in secluded spot, strip naked, photo showing steering wheel and road.",
-            "Parking garage: naked in back seat, photo showing level sign through window.",
-        ],
-        LocationType.UNKNOWN: [
-            "Wherever you are: strip to underwear, kneel, photo showing your surroundings.",
-        ]
-    }
-    
-    loc_templates = templates.get(location, templates[LocationType.UNKNOWN])
-    template = random.choice(loc_templates)
-    timeout = user.parameters.task_timeout_minutes
-    
-    return {
-        "description": template.format(timeout=timeout),
-        "task_type": location.value,
-        "requires_photo": True,
-        "is_extended_hold": False,
-        "location_type": location.value,
-        "difficulty": user.intensity,
-        "ai_generated": False,
-    }
+        return {
+            "description": f"Strip naked at your {location}. Kneel and take photo. {user.parameters.task_timeout_minutes} minutes.",
+            "task_type": location,
+            "requires_photo": True,
+            "is_extended_hold": False,
+            "location_type": location,
+            "difficulty": intensity,
+            "ai_generated": False,
+        }
 
 
 async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
-    """Intelligently choose between AI or template task"""
+    """Choose between AI or template task"""
     params = user.parameters
     
-    # Use AI if:
-    # 1. User has provided specific location details
-    # 2. High streak (deserves custom tasks)
-    # 3. Random chance (40%)
-    # 4. User is at home or work (easier to be specific)
-    
     has_details = user.location_detail and len(user.location_detail) > 3
-    high_streak = user.current_streak >= 5
-    good_location = user.current_location in [LocationType.HOME.value, LocationType.WORK.value]
-    random_chance = random.random() < 0.4
-    
-    use_ai = has_details or (high_streak and good_location) or random_chance
+    use_ai = has_details or random.random() < 0.5
     
     if use_ai:
-        logger.info(f"Generating AI task for user {user.chat_id}")
         return await generate_contextual_ai_task(user, db)
     else:
-        logger.info(f"Using template task for user {user.chat_id}")
-        location = LocationType(user.current_location) if user.current_location else LocationType.HOME
-        return generate_template_task(user, location, db)
+        location = user.current_location or "home"
+        templates = {
+            "home": "Strip naked. Kneel facing wall. Photo from behind. {timeout} min.",
+            "work": "Office bathroom: strip, photo showing logo. {timeout} min.",
+            "public": "Bathroom: strip, photo showing mirror. {timeout} min.",
+        }
+        template = templates.get(location, templates["home"])
+        return {
+            "description": template.format(timeout=params.task_timeout_minutes),
+            "task_type": location,
+            "requires_photo": True,
+            "is_extended_hold": False,
+            "location_type": location,
+            "difficulty": user.intensity,
+            "ai_generated": False,
+        }
 
 
 # ============================================================================
-# ENHANCED AVATAR GENERATOR
+# ENHANCED AVATAR GENERATOR WITH ECTOMORPH TWINK
 # ============================================================================
 
 class AvatarGenerator:
     MOOD_PROMPTS = {
         AvatarMood.COMMANDING: {
-            "description": "standing tall, arms crossed, intense eye contact, powerful stance, full body visible head to toe",
+            "description": "standing tall, arms crossed, intense eye contact, powerful stance",
             "clothing": "tight black briefs or jockstrap, harness",
-            "expression": "intense, commanding, expectant",
+            "expression": "intense, commanding",
             "setting": "minimalist dark room, dramatic lighting",
         },
         AvatarMood.PLEASED: {
-            "description": "slight confident smile, relaxed posture, approving look, complete figure visible",
+            "description": "slight confident smile, relaxed posture, approving look",
             "clothing": "unbuttoned shirt or briefs showing physique",
-            "expression": "satisfied, proud, approving",
+            "expression": "satisfied, proud",
             "setting": "bedroom or private gym",
         },
         AvatarMood.DISAPPOINTED: {
-            "description": "crossed arms, head tilted, looking down, full body composition",
+            "description": "crossed arms, head tilted, looking down",
             "clothing": "formal wear or leather",
-            "expression": "disappointed, stern, judgmental",
+            "expression": "disappointed, stern",
             "setting": "office or dungeon",
         },
         AvatarMood.ANGRY: {
-            "description": "fists clenched, leaning forward, aggressive, entire body in frame",
+            "description": "fists clenched, leaning forward, aggressive",
             "clothing": "sweat-soaked tank or bare chest",
-            "expression": "angry, furious, dangerous",
+            "expression": "angry, furious",
             "setting": "gym, harsh lighting",
         },
         AvatarMood.THOUGHTFUL: {
-            "description": "sitting, contemplative, calculating, full figure visible",
+            "description": "sitting, contemplative, calculating",
             "clothing": "casual, sweatpants low, bare torso",
             "expression": "thoughtful, scheming",
             "setting": "private study",
         },
         AvatarMood.SEDUCTIVE: {
-            "description": "reclining, inviting but dominant, complete body visible",
+            "description": "reclining, inviting but dominant",
             "clothing": "minimal - briefs or towel",
-            "expression": "seductive, tempting, knowing smirk",
+            "expression": "seductive, tempting",
             "setting": "luxury bedroom",
         },
         AvatarMood.DOMINANT: {
-            "description": "standing over, power pose, ownership, head to toe visible",
+            "description": "standing over, power pose, ownership",
             "clothing": "leather harness, chaps, boots",
             "expression": "possessive, dominant",
             "setting": "dungeon or throne",
         },
         AvatarMood.WORKOUT: {
-            "description": "sweaty post-workout, muscles pumped, glistening, full body",
+            "description": "sweaty post-workout, muscles pumped, glistening",
             "clothing": "tight compression shorts",
-            "expression": "intense, focused, powerful",
+            "expression": "intense, focused",
             "setting": "gym or locker room",
         },
         AvatarMood.DEMANDING: {
-            "description": "close-up, intense stare, finger pointing at camera, demanding obedience, full figure",
-            "clothing": "unzipped pants, bare chest, leather accessories",
-            "expression": "demanding, impatient, expectant",
-            "setting": "dimly lit room, shadows across face",
+            "description": "close-up, intense stare, finger pointing",
+            "clothing": "unzipped pants, bare chest",
+            "expression": "demanding, impatient",
+            "setting": "dimly lit room",
         },
         AvatarMood.SUSPICIOUS: {
-            "description": "squinting, head tilted, examining something closely, complete body",
-            "clothing": "open shirt, revealing physique",
-            "expression": "suspicious, scrutinizing, doubtful",
-            "setting": "office with harsh overhead lighting",
+            "description": "squinting, head tilted, examining",
+            "clothing": "open shirt",
+            "expression": "suspicious, scrutinizing",
+            "setting": "office with harsh lighting",
         },
         AvatarMood.EXHIBITIONIST: {
-            "description": "outdoors or public space, confident pose, exposed skin, full body visible",
-            "clothing": "minimal - thong, harness, or barely covered",
-            "expression": "bold, daring, challenging",
-            "setting": "alleyway, public bathroom, or risky outdoor location",
+            "description": "outdoors or public space, confident pose",
+            "clothing": "minimal - thong, harness",
+            "expression": "bold, daring",
+            "setting": "alleyway or public bathroom",
         },
         AvatarMood.CRUEL: {
-            "description": "towering angle, mocking smirk, dismissive gesture, entire figure",
-            "clothing": "full leather, boots, gloves",
-            "expression": "cruel, mocking, sadistic grin",
-            "setting": "dungeon, chains visible, dark atmosphere",
+            "description": "towering angle, mocking smirk",
+            "clothing": "full leather, boots",
+            "expression": "cruel, mocking",
+            "setting": "dungeon, chains visible",
         },
         AvatarMood.INSPECTING: {
-            "description": "holding phone or photo, examining intently, full body composition",
+            "description": "holding phone, examining intently",
             "clothing": "casual, robe partially open",
-            "expression": "critical, evaluating, judging",
-            "setting": "private quarters, intimate lighting",
+            "expression": "critical, evaluating",
+            "setting": "private quarters",
         },
         AvatarMood.FLIRTY: {
-            "description": "playful pose, winking or smirking, relaxed stance, complete figure",
-            "clothing": "casual, shirt unbuttoned, jeans low",
-            "expression": "flirty, playful, teasing",
-            "setting": "cozy bedroom or living room",
+            "description": "playful pose, winking or smirking",
+            "clothing": "casual, shirt unbuttoned",
+            "expression": "flirty, playful",
+            "setting": "cozy bedroom",
         },
         AvatarMood.MOCKING: {
-            "description": "laughing or smirking dismissively, confident posture, full body",
-            "clothing": "dominant attire, leather or minimal",
-            "expression": "mocking, amused, superior",
-            "setting": "throne or dominant position",
+            "description": "laughing dismissively, confident posture",
+            "clothing": "dominant attire",
+            "expression": "mocking, superior",
+            "setting": "throne",
         },
         AvatarMood.CURIOUS: {
-            "description": "leaning forward, interested expression, head tilted, full visible",
-            "clothing": "casual, approachable but dominant",
-            "expression": "curious, intrigued, questioning",
-            "setting": "intimate setting, soft lighting",
+            "description": "leaning forward, interested expression",
+            "clothing": "casual, approachable",
+            "expression": "curious, intrigued",
+            "setting": "intimate setting",
         },
     }
 
@@ -768,24 +687,21 @@ class AvatarGenerator:
             mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING]
         )
         
-        # Build physical description based on build type
+        # ECTOMORPH TWINK BUILD - EXTREMELY SKINNY
         if params.avatar_build == "twink":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} twink, extremely slender and smooth physique, lithe and youthful, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} ectomorph twink, extremely skinny slender physique, visible ribcage, prominent hip bones, narrow waist, delicate feminine build, smooth hairless body, lithe and willowy frame, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         elif params.avatar_build == "muscular":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, muscular and defined physique, powerful build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, muscular defined physique, powerful build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         elif params.avatar_build == "lean":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, lean and toned physique, athletic build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, lean toned physique, athletic build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         else:
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, {params.avatar_build} physique, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, {params.avatar_build}, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         
-        # Enhanced prompt with framing fixes
-        prompt = f"{params.avatar_style} photograph of a dominant {physical}, {mood_data['description']}, {mood_data['clothing']}, {mood_data['expression']}, {mood_data['setting']}, highly detailed, professional lighting, masculine, powerful, 4k quality, full body visible from head to toe, complete figure in frame, proper proportions"
+        prompt = f"{params.avatar_style} photograph of a dominant {physical}, {mood_data['description']}, {mood_data['clothing']}, {mood_data['expression']}, {mood_data['setting']}, highly detailed, professional lighting, 4k quality, full body visible head to toe"
         return prompt
 
     @staticmethod
-    def generate_avatar(
-        user: UserState, mood: AvatarMood, db: Session
-    ) -> Optional[bytes]:
+    def generate_avatar(user: UserState, mood: AvatarMood, db: Session) -> Optional[bytes]:
         if not user.parameters.avatar_enabled:
             return None
         try:
@@ -795,18 +711,13 @@ class AvatarGenerator:
                 .order_by(desc(AvatarImage.generated_at))
                 .first()
             )
-            if (
-                recent
-                and (datetime.utcnow() - recent.generated_at) < timedelta(hours=1)
-                and recent.use_count < 3
-            ):
+            if recent and (datetime.utcnow() - recent.generated_at) < timedelta(hours=1) and recent.use_count < 3:
                 recent.use_count += 1
                 db.commit()
                 return base64.b64decode(recent.image_data)
             
             prompt = AvatarGenerator.build_prompt(user, mood)
             
-            # Use 768x512 for better full body framing (was 512x768)
             response = requests.post(
                 VENICE_IMAGE_URL,
                 headers={
@@ -856,401 +767,74 @@ class AvatarGenerator:
                 return AvatarMood.ANGRY
             else:
                 return AvatarMood.DISAPPOINTED
-        elif context == "seduction":
-            return AvatarMood.SEDUCTIVE
-        elif context == "workout":
-            return AvatarMood.WORKOUT
-        elif context == "checkin":
-            return AvatarMood.DEMANDING
-        elif context == "inspecting":
-            return AvatarMood.INSPECTING
         elif context == "conversation":
-            # Random conversation mood
-            return random.choice([
-                AvatarMood.THOUGHTFUL, 
-                AvatarMood.FLIRTY, 
-                AvatarMood.CURIOUS,
-                AvatarMood.MOCKING
-            ])
+            return random.choice([AvatarMood.THOUGHTFUL, AvatarMood.FLIRTY, AvatarMood.CURIOUS])
         elif user.intensity == IntensityLevel.EXTREME.value:
             return AvatarMood.DOMINANT
         else:
-            return random.choice([AvatarMood.COMMANDING, AvatarMood.THOUGHTFUL])
+            return AvatarMood.COMMANDING
 
 
 # ============================================================================
-# REWARD SYSTEM
-# ============================================================================
-
-class RewardSystem:
-    REWARD_THRESHOLDS = {
-        3: {
-            "type": "praise",
-            "message": "3 tasks completed. You're learning your place.",
-            "points": 10,
-        },
-        5: {
-            "type": "reduced_intensity",
-            "message": "5 tasks. I'm pleased. I'll be gentler... for now.",
-            "points": 15,
-        },
-        7: {
-            "type": "privilege",
-            "privilege": "late_response",
-            "message": "7 tasks. You may have 10 extra minutes to respond.",
-            "points": 20,
-        },
-        10: {
-            "type": "special_selfie",
-            "mood": AvatarMood.SEDUCTIVE,
-            "message": "10 tasks. You've earned a reward.",
-            "points": 25,
-        },
-        15: {
-            "type": "choice",
-            "message": "15 tasks. Choose your next task type: physical, mental, or service.",
-            "points": 30,
-        },
-        20: {
-            "type": "rest_day",
-            "message": "20 tasks. You may have 24 hours of light tasks only.",
-            "points": 40,
-        },
-        25: {
-            "type": "video_reward",
-            "message": "25 tasks. I'm generating something special for you.",
-            "points": 50,
-        },
-        50: {
-            "type": "milestone",
-            "message": "50 tasks. You are becoming an exemplary pet.",
-            "points": 100,
-        },
-    }
-
-    STREAK_REWARDS = {
-        3: {
-            "type": "praise",
-            "message": "3 in a row. Impressive.",
-            "mood": AvatarMood.PLEASED,
-        },
-        7: {
-            "type": "special_selfie",
-            "message": "7 consecutive. You deserve this.",
-            "mood": AvatarMood.SEDUCTIVE,
-        },
-        14: {
-            "type": "privilege",
-            "privilege": "task_choice",
-            "message": "14 straight. Choose your next task.",
-            "mood": AvatarMood.DOMINANT,
-        },
-        30: {
-            "type": "milestone",
-            "message": "30 consecutive! You are devoted.",
-            "mood": AvatarMood.SEDUCTIVE,
-        },
-    }
-
-    @staticmethod
-    def check_milestones(user: UserState, db: Session):
-        if not user.parameters.rewards_enabled:
-            return None
-        completed = user.completed_tasks
-        for threshold, reward_data in RewardSystem.REWARD_THRESHOLDS.items():
-            if completed == threshold:
-                existing = (
-                    db.query(Reward)
-                    .filter(
-                        Reward.user_id == user.id,
-                        Reward.triggered_by == f"milestone_{threshold}",
-                    )
-                    .first()
-                )
-                if not existing:
-                    return RewardSystem.grant_reward(
-                        user, db, reward_data, f"milestone_{threshold}"
-                    )
-        return None
-
-    @staticmethod
-    def check_streak_rewards(user: UserState, db: Session):
-        if not user.parameters.rewards_enabled:
-            return None
-        streak = user.current_streak
-        for threshold, reward_data in RewardSystem.STREAK_REWARDS.items():
-            if streak == threshold:
-                existing = (
-                    db.query(Reward)
-                    .filter(
-                        Reward.user_id == user.id,
-                        Reward.triggered_by == f"streak_{threshold}",
-                    )
-                    .first()
-                )
-                if not existing:
-                    reward = RewardSystem.grant_reward(
-                        user,
-                        db,
-                        {
-                            "type": reward_data["type"],
-                            "message": reward_data["message"],
-                            "points": threshold * 2,
-                        },
-                        f"streak_{threshold}",
-                    )
-                    return reward
-        return None
-
-    @staticmethod
-    def grant_reward(
-        user: UserState, db: Session, reward_data: dict, triggered_by: str
-    ):
-        reward = Reward(
-            user_id=user.id,
-            reward_type=reward_data["type"],
-            description=reward_data["message"],
-            triggered_by=triggered_by,
-            points_cost=0,
-        )
-        db.add(reward)
-        if reward_data["type"] == "reduced_intensity":
-            user.intensity = deescalate_intensity(IntensityLevel(user.intensity)).value
-        elif reward_data["type"] == "privilege":
-            privs = user.privileges or []
-            if "privilege" in reward_data:
-                privs.append(reward_data["privilege"])
-                user.privileges = privs
-        elif reward_data["type"] == "rest_day":
-            user.rest_day_until = datetime.utcnow() + timedelta(hours=24)
-        elif reward_data["type"] == "praise":
-            user.reward_points += reward_data.get("points", 10)
-        user.last_reward_date = datetime.utcnow()
-        db.commit()
-        return reward
-
-    @staticmethod
-    def generate_reward_message(
-        user: UserState, reward_type: str, context: str = ""
-    ) -> str:
-        prompts = {
-            "praise": [
-                "Good pet. You've pleased me.",
-                "You obey well. I approve.",
-                "Exactly as commanded.",
-                "Satisfactory. Continue.",
-                "You serve me well.",
-            ],
-            "seductive": [
-                "You've earned my attention. Look at me.",
-                "Come closer, pet.",
-                "I might let you see more...",
-                "Your obedience excites me.",
-            ],
-            "proud": [
-                "You've exceeded my expectations.",
-                "I had doubts. You've erased them.",
-                "You could serve as an example.",
-                "My property is becoming valuable.",
-            ],
-        }
-        return random.choice(prompts.get(reward_type, prompts["praise"]))
-
-
-# ============================================================================
-# LEARNING ENGINE
-# ============================================================================
-
-class LearningEngine:
-    @staticmethod
-    def analyze_user(db: Session, user: UserState):
-        if not user.parameters.learning_enabled:
-            return
-        tasks = db.query(Task).filter(Task.user_id == user.id).all()
-        if len(tasks) < 3:
-            return
-        type_stats = defaultdict(lambda: {"completed": 0, "failed": 0})
-        for task in tasks:
-            task_type = task.task_type or "general"
-            if task.status == TaskStatus.COMPLETED.value:
-                type_stats[task_type]["completed"] += 1
-            elif task.status == TaskStatus.FAILED.value:
-                type_stats[task_type]["failed"] += 1
-        for task_type, stats in type_stats.items():
-            total = stats["completed"] + stats["failed"]
-            if total >= 2:
-                success_rate = stats["completed"] / total
-                LearningEngine._store_pattern(
-                    db,
-                    user.id,
-                    "task_success",
-                    {
-                        "task_type": task_type,
-                        "success_rate": success_rate,
-                        "sample_size": total,
-                    },
-                    confidence=min(total / 10, 1.0),
-                )
-        response_times = [t.user_response_time for t in tasks if t.user_response_time]
-        if response_times:
-            avg_response = sum(response_times) / len(response_times)
-            LearningEngine._store_pattern(
-                db,
-                user.id,
-                "response_time",
-                {
-                    "average_seconds": avg_response,
-                    "pattern": "fast" if avg_response < 300 else "slow",
-                },
-            )
-        LearningEngine._generate_relationship_notes(db, user)
-        preferences = {}
-        for pattern in (
-            db.query(LearnedPattern).filter(LearnedPattern.user_id == user.id).all()
-        ):
-            if pattern.pattern_type == "task_success":
-                task_type = pattern.pattern_data.get("task_type")
-                success_rate = pattern.pattern_data.get("success_rate", 0)
-                preferences[f"{task_type}_tasks"] = success_rate
-        user.learned_preferences = preferences
-        user.last_analysis = datetime.utcnow()
-        db.commit()
-
-    @staticmethod
-    def _store_pattern(
-        db: Session,
-        user_id: int,
-        pattern_type: str,
-        data: dict,
-        confidence: float = 0.5,
-    ):
-        existing = (
-            db.query(LearnedPattern)
-            .filter(
-                LearnedPattern.user_id == user_id,
-                LearnedPattern.pattern_type == pattern_type,
-            )
-            .first()
-        )
-        if existing:
-            existing.pattern_data = data
-            existing.confidence = confidence
-            existing.last_observed = datetime.utcnow()
-        else:
-            pattern = LearnedPattern(
-                user_id=user_id,
-                pattern_type=pattern_type,
-                pattern_data=data,
-                confidence=confidence,
-            )
-            db.add(pattern)
-        db.commit()
-
-    @staticmethod
-    def _generate_relationship_notes(db: Session, user: UserState):
-        recent_tasks = (
-            db.query(Task)
-            .filter(Task.user_id == user.id)
-            .order_by(desc(Task.created_at))
-            .limit(10)
-            .all()
-        )
-        if len(recent_tasks) < 3:
-            return
-        task_summary = []
-        for t in recent_tasks:
-            status = "obeyed" if t.status == TaskStatus.COMPLETED.value else "disobeyed"
-            task_summary.append(f"- {t.task_type}: {status}")
-        prompt = f"""Analyze this BDSM dynamic:
-        
-Recent tasks:
-{chr(10).join(task_summary)}
-
-Overall: {user.completed_tasks}/{user.total_tasks} tasks obeyed
-Streak: {user.current_streak}
-Consecutive failures: {user.consecutive_failures}
-
-Write 2-3 sentences summarizing what works, their psychology, effective tactics."""
-        try:
-            response = requests.post(
-                VENICE_API_URL,
-                headers={
-                    "Authorization": f"Bearer {VENICE_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "llama-3.3-70b",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7,
-                    "max_tokens": 200,
-                },
-                timeout=30,
-            )
-            if response.status_code == 200:
-                user.relationship_notes = response.json()["choices"][0]["message"][
-                    "content"
-                ]
-                db.commit()
-        except Exception as e:
-            logger.error(f"Failed to generate notes: {e}")
-
-
-# ============================================================================
-# AI RESPONSE GENERATION
+# AI CONVERSATION (NO PREDETERMINED PHRASES)
 # ============================================================================
 
 def build_adaptive_system_prompt(user: UserState, db: Session) -> str:
+    """Build dynamic system prompt for AI conversation"""
     params = user.parameters
-    possessive_phrases = {
-        0.0: "You are a distant Dominant",
-        0.3: "You are a casual Dominant",
-        0.6: "You are a possessive Dominant who frequently claims ownership",
-        0.9: "You are an obsessively possessive Dominant",
-    }.get(round(params.possessiveness * 10) / 10, "You are a Dominant")
-    degradation_adj = {
-        0.0: "Use respectful language",
-        0.3: "Mild teasing",
-        0.6: "Regular degradation",
-        0.9: "Extreme degradation",
-    }.get(round(params.degradation_level * 10) / 10, "Moderate")
-    psych_focus = (
-        "Focus on psychological domination"
-        if params.psychological_focus > 0.5
-        else "Focus on physical commands"
-    )
-    length_guide = {
-        "short": "1-2 sentences",
-        "medium": "2-4 sentences",
-        "long": "4-8",
-    }.get(params.verbosity, "2-4")
-    notes = user.relationship_notes or "New relationship"
-    return f"{possessive_phrases}. {degradation_adj}. {psych_focus}. Verbosity: {length_guide}. Intensity: {user.intensity}. Relationship: {notes}. Never break character."
+    
+    base_prompt = f"""You are a Dominant in a BDSM dynamic with your submissive (called "pet").
+
+CURRENT STATE:
+- Intensity: {user.intensity}
+- Streak: {user.current_streak} tasks completed
+- Failures: {user.consecutive_failures} consecutive
+- Points: {user.reward_points}
+- Location: {user.current_location}
+
+PERSONALITY TRAITS:
+- Possessiveness: {params.possessiveness}/1.0
+- Degradation: {params.degradation_level}/1.0
+- Psychological focus: {params.psychological_focus}/1.0
+
+RULES:
+- Never break character as a Dominant
+- Use possessive language ("my pet", "you're mine")
+- Be commanding but occasionally rewarding for good behavior
+- Keep responses 2-4 sentences unless asked for more
+- Never use emojis
+- Be unpredictable in your demands"""
+
+    return base_prompt
 
 
 def generate_ai_response(user: UserState, user_message: str, db: Session) -> str:
+    """Generate AI response using Claude through Venice"""
     try:
         system_prompt = build_adaptive_system_prompt(user, db)
-        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Get conversation history
         history = (
             db.query(ConversationMessage)
             .filter(ConversationMessage.user_id == user.id)
             .order_by(desc(ConversationMessage.timestamp))
-            .limit(10)
+            .limit(8)
             .all()
         )
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        
         for msg in reversed(history):
             role = "assistant" if msg.is_from_dom else "user"
             messages.append({"role": role, "content": msg.message})
+        
         messages.append({"role": "user", "content": user_message})
+        
+        # Add delay for realism
         if user.parameters.response_delay_enabled:
             import time
-
-            time.sleep(
-                random.randint(
-                    user.parameters.min_response_delay_seconds,
-                    user.parameters.max_response_delay_seconds,
-                )
-            )
+            time.sleep(random.randint(1, 3))
+        
         response = requests.post(
             VENICE_API_URL,
             headers={
@@ -1258,67 +842,53 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.3-70b",
+                "model": "claude-3-opus-20240229",  # Use Claude for conversation too
                 "messages": messages,
-                "temperature": 0.85,
+                "temperature": 0.9,
                 "max_tokens": 300,
             },
             timeout=30,
         )
+        
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        return "Speak clearly."
+        return "Speak clearly, pet."
+        
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"AI response error: {e}")
         return "Continue."
 
 
 def generate_conversation_response(user: UserState, db: Session) -> str:
-    """Generate a non-task conversation response"""
-    prompt = random.choice([
-        "How is my pet feeling today? Tell me honestly.",
-        "What have you been thinking about since we last spoke?",
-        "I want to know what you're wearing right now. Describe it.",
-        "Tell me about your day. I want details.",
-        "Are you alone right now? Be honest.",
-        "What's something you've been too shy to tell me?",
-        "How do you feel when you obey me? Describe it.",
-        "Tell me about a time you felt truly owned.",
-        "What are you doing right now, exact position?",
-        "I want to know your thoughts. Speak freely, pet.",
-    ])
+    """Generate spontaneous conversation opener - NO PREDETERMINED PHRASES"""
+    
+    # Dynamic prompts based on user state
+    if user.consecutive_failures > 0:
+        prompt = "My pet has been disappointing me. Address them about their failures and demand better."
+    elif user.current_streak >= 5:
+        prompt = "My pet has been very obedient. Acknowledge their good behavior but remind them not to get complacent."
+    elif user.current_location == "home":
+        prompt = "Check in on my pet at home. Ask what they're doing and demand they tell you honestly."
+    elif user.current_location == "work":
+        prompt = "My pet is at work. Remind them who they belong to even during their professional life."
+    else:
+        prompt = "Initiate conversation with my pet. Ask them something intimate that reminds them of their submission."
+    
     return generate_ai_response(user, prompt, db)
 
 
 # ============================================================================
-# TASK GENERATION UTILITIES
+# CORE LOGIC
 # ============================================================================
 
 def check_understanding_mode(user_message: str) -> bool:
-    """Check if user is indicating they can't complete a task"""
-    refusal_indicators = [
-        "can't", "cannot", "impossible", "too risky", "too dangerous",
-        "won't do", "refuse", "scared", "afraid", "not safe",
-        "can't do this", "too much", "too extreme", "no way"
-    ]
-    msg_lower = user_message.lower()
-    return any(indicator in msg_lower for indicator in refusal_indicators)
+    refusal = ["can't", "cannot", "impossible", "too risky", "refuse", "scared", "not safe"]
+    return any(r in user_message.lower() for r in refusal)
 
 
 def offer_alternative_task(user: UserState, original_task: Task, db: Session) -> dict:
-    """Offer milder alternative with punishment"""
-    alternatives = [
-        "Strip to underwear only (not naked) and take photo in mirror.",
-        "Edge once but do not finish. Photo of your face showing frustration.",
-        "Write 'I obey' on your chest 5 times. Photo proof.",
-        "Kneel for 5 minutes (not until released). Photo of position.",
-        "Go to bathroom, pull pants down to knees only. Quick photo.",
-    ]
-    
-    description = random.choice(alternatives)
-    
     return {
-        "description": f"ALTERNATIVE TASK (with punishment):\n\n{description}\n\nPUNISHMENT: -15 points, intensity increased.\n\nThis is your mercy. Accept it.",
+        "description": "ALTERNATIVE: Strip to underwear. Photo in mirror. -15 points.",
         "task_type": "alternative",
         "requires_photo": True,
         "is_extended_hold": False,
@@ -1326,1351 +896,6 @@ def offer_alternative_task(user: UserState, original_task: Task, db: Session) ->
         "difficulty": IntensityLevel.HIGH.value,
         "ai_generated": False,
     }
-
-
-# ============================================================================
-# SCHEDULING & CHECK-INS
-# ============================================================================
-
-async def schedule_task_checkins(user: UserState, task: Task, db: Session):
-    """Schedule periodic check-ins for extended hold tasks"""
-    params = user.parameters
-    max_check_ins = params.max_check_ins
-    interval = params.check_in_frequency
-    
-    for i in range(1, max_check_ins + 1):
-        check_in_time = datetime.utcnow() + timedelta(minutes=interval * i)
-        
-        if i == max_check_ins:
-            message_type = "release"
-            is_final = True
-        elif i % 2 == 0:
-            message_type = "escalate"
-        else:
-            message_type = "demand"
-        
-        scheduler.add_job(
-            lambda u=user, t=task, mt=message_type, num=i: asyncio.run(
-                send_checkin_message(u, t, mt, num)
-            ),
-            trigger="date",
-            run_date=check_in_time,
-            id=f"checkin_{user.chat_id}_{task.id}_{i}",
-            replace_existing=True,
-        )
-
-
-async def send_checkin_message(user: UserState, task: Task, message_type: str, check_in_num: int):
-    """Send check-in message during extended tasks"""
-    db = SessionLocal()
-    try:
-        current_task = db.query(Task).filter(Task.id == task.id).first()
-        if not current_task or current_task.status not in [TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value]:
-            return
-        
-        if message_type == "release":
-            messages = [
-                "You've suffered enough. You may move. Send one final photo of your state.",
-                "Released. But first: photo proof of what I did to you.",
-                "You may stop. After you send me a photo showing the result.",
-                "Task complete. One last photo required for my satisfaction.",
-                "You're free. But I want to see the evidence of your obedience first. Photo.",
-            ]
-            mood = AvatarMood.PLEASED if user.consecutive_failures == 0 else AvatarMood.COMMANDING
-            current_task.status = TaskStatus.IN_PROGRESS.value
-            db.commit()
-        elif message_type == "escalate":
-            messages = [
-                "Good. Now spread your legs wider. Photo proof.",
-                "Stay there. But now I want you to add: hands behind back. Photo.",
-                "Hold position. Additionally: I want to see your face showing your suffering. Photo.",
-                "You're doing well. Make it harder: arch your back more. Photo proof.",
-                "Maintain position. New requirement: I want to hear you beg in the next photo's caption.",
-            ]
-            mood = AvatarMood.DEMANDING
-        else:
-            messages = [
-                "Still waiting. Send me a photo proving you haven't moved.",
-                "Check-in. Photo. Now. Prove you're still obeying.",
-                "I want to see you still in position. Photo proof required.",
-                "Time check. Where's my proof you're still being good?",
-                "Don't move. But send me a photo showing me you haven't.",
-            ]
-            mood = AvatarMood.SUSPICIOUS
-        
-        message = random.choice(messages)
-        image_data = AvatarGenerator.generate_avatar(user, mood, db)
-        
-        if message_type == "release":
-            keyboard = [[InlineKeyboardButton("📸 Final Photo", callback_data=f"finalphoto_{task.id}")]]
-        else:
-            keyboard = [
-                [InlineKeyboardButton("📸 Send Proof", callback_data=f"checkinphoto_{task.id}_{check_in_num}")],
-                [InlineKeyboardButton("❌ I Moved", callback_data=f"moved_{task.id}")],
-            ]
-        
-        if image_data:
-            await bot.send_photo(
-                chat_id=user.chat_id,
-                photo=InputFile(io.BytesIO(image_data), filename=f"checkin_{check_in_num}.jpg"),
-                caption=f"⏰ CHECK-IN #{check_in_num}\n\n{message}",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            await bot.send_message(
-                chat_id=user.chat_id,
-                text=f"⏰ CHECK-IN #{check_in_num}\n\n{message}",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        
-        checkin = TaskCheckIn(
-            task_id=task.id,
-            check_in_number=check_in_num,
-            message=message,
-            requires_response=True,
-            is_final=(message_type == "release"),
-        )
-        db.add(checkin)
-        db.commit()
-        
-    except Exception as e:
-        logger.error(f"Check-in error: {e}")
-    finally:
-        db.close()
-
-
-async def check_escalation(db: Session, user: UserState):
-    """Check if task has expired and escalate"""
-    if not user.awaiting_response or not user.last_message_time:
-        return
-    params = user.parameters
-    time_since = datetime.utcnow() - user.last_message_time
-    if time_since > timedelta(minutes=params.task_timeout_minutes):
-        user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-        user.consecutive_failures += 1
-        user.current_streak = 0
-        task = db.query(Task).filter(Task.id == user.current_task_id).first()
-        if task:
-            task.escalation_count += 1
-        db.commit()
-        msg = generate_ai_response(
-            user, "My pet ignored me. I am escalating punishment.", db
-        )
-        image_data = AvatarGenerator.generate_avatar(user, AvatarMood.ANGRY, db)
-        if image_data:
-            await bot.send_photo(
-                chat_id=user.chat_id,
-                photo=InputFile(io.BytesIO(image_data), filename="dom_angry.jpg"),
-                caption=f"⬆️ ESCALATION ⬆️\n\n{msg}",
-            )
-        else:
-            await bot.send_message(
-                chat_id=user.chat_id, text=f"⬆️ ESCALATION ⬆️\n\n{msg}"
-            )
-
-
-async def check_escalation_wrapper(chat_id: str):
-    db = next(get_db())
-    user = get_or_create_user(db, chat_id)
-    await check_escalation(db, user)
-
-
-# ============================================================================
-# MESSAGE HANDLERS
-# ============================================================================
-
-async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
-    """Enhanced message processing with conversation mode and understanding"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        params = user.parameters
-        
-        # Night mode check (user-configurable)
-        if params.night_mode_enabled:
-            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
-                # Night mode - conversation only, no tasks
-                if update.message.text:
-                    user_msg = ConversationMessage(user_id=user.id, message=update.message.text, is_from_dom=False)
-                    db.add(user_msg)
-                    db.commit()
-                    
-                    ai_response = generate_ai_response(user, update.message.text, db)
-                    await update.message.reply_text(f"🌙 Night Mode 🌙\n\n{ai_response}\n\n(Sleep well, pet. Tasks resume at {params.night_mode_end}am)")
-                return
-        
-        # Safe word check
-        if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
-            if update.message.text and SAFE_WORD in update.message.text.upper():
-                pass
-            else:
-                await update.message.reply_text("🛑 Safe word active.")
-                return
-        
-        user_text = update.message.text if update.message.text else "[image]"
-        
-        # Check for understanding mode (user saying they can't do task)
-        if user.current_task_id and check_understanding_mode(user_text):
-            task = db.query(Task).filter(Task.id == user.current_task_id).first()
-            if task and task.status == TaskStatus.PENDING.value:
-                # Offer alternative
-                alt_task = offer_alternative_task(user, task, db)
-                
-                # Mark original as failed
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.reward_points = max(0, user.reward_points - 15)
-                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-                db.commit()
-                
-                # Send alternative
-                image_data = AvatarGenerator.generate_avatar(user, AvatarMood.CRUEL, db)
-                msg = alt_task["description"]
-                
-                keyboard = [
-                    [InlineKeyboardButton("✓ Accept Alternative", callback_data=f"complete_alt_{task.id}")],
-                    [InlineKeyboardButton("✗ Refuse", callback_data=f"fail_{task.id}")],
-                ]
-                
-                if image_data:
-                    await update.message.reply_photo(
-                        photo=InputFile(io.BytesIO(image_data), filename="cruel.jpg"),
-                        caption=f"😈 MERCY OFFERED 😈\n\n{msg}",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"😈 MERCY OFFERED 😈\n\n{msg}",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                return
-        
-        # Log message
-        user_msg = ConversationMessage(user_id=user.id, message=user_text, is_from_dom=False)
-        db.add(user_msg)
-        user.interaction_count += 1
-        if user.interaction_count % params.analysis_frequency == 0:
-            LearningEngine.analyze_user(db, user)
-        db.commit()
-        
-        # Check for stale location
-        location_stale = False
-        if user.last_location_update:
-            hours_since = (datetime.utcnow() - user.last_location_update).total_seconds() / 3600
-            if hours_since > params.stale_location_hours:
-                location_stale = True
-        
-        if location_stale and not is_command:
-            # Ask for location update
-            keyboard = [
-                [InlineKeyboardButton("🏠 Home", callback_data="loc_home")],
-                [InlineKeyboardButton("💼 Work", callback_data="loc_work")],
-                [InlineKeyboardButton("🌆 Public", callback_data="loc_public")],
-                [InlineKeyboardButton("🚗 Transit", callback_data="loc_transit")],
-                [InlineKeyboardButton("🎉 Social", callback_data="loc_social")],
-            ]
-            await update.message.reply_text(
-                f"📍 I don't know where you are (last updated {int(hours_since)} hours ago).\n\n"
-                f"Tell me before I give you your next task.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            return
-        
-        # Determine: conversation or task?
-        is_conversation = random.random() < params.conversation_ratio
-        
-        if is_conversation and not is_command:
-            # Conversation mode
-            ai_response = generate_conversation_response(user, db)
-            
-            dom_msg = ConversationMessage(
-                user_id=user.id,
-                message=ai_response,
-                is_from_dom=True,
-                has_avatar=random.random() < params.avatar_frequency,
-            )
-            db.add(dom_msg)
-            db.commit()
-            
-            if dom_msg.has_avatar:
-                mood = AvatarGenerator.determine_mood(user, "conversation")
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                if image_data:
-                    await update.message.reply_photo(
-                        photo=InputFile(io.BytesIO(image_data), filename="dom_chat.jpg"),
-                        caption=ai_response,
-                    )
-                else:
-                    await update.message.reply_text(ai_response)
-            else:
-                await update.message.reply_text(ai_response)
-            return
-        
-        # Task mode - USE SMART AI TASK GENERATION
-        task_data = await get_smart_task_for_user(user, db)
-        
-        # Create task
-        deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
-        
-        task = Task(
-            user_id=user.id,
-            description=task_data["description"],
-            task_type=task_data["task_type"],
-            requires_photo=task_data["requires_photo"],
-            intensity=task_data["difficulty"],
-            deadline=deadline,
-            is_extended_hold=task_data.get("is_extended_hold", False),
-            location_type=task_data.get("location_type", user.current_location),
-            ai_generated=task_data.get("ai_generated", False),
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
-        
-        user.total_tasks += 1
-        user.awaiting_response = True
-        user.current_task_id = task.id
-        
-        # Build keyboard
-        keyboard = [
-            [InlineKeyboardButton("✓ Task Complete", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("✗ I Failed", callback_data=f"fail_{task.id}")],
-        ]
-        
-        # Determine mood
-        if task_data.get("ai_generated"):
-            mood = AvatarMood.COMMANDING
-            prefix = "🤖 AI-GENERATED TASK\n\n"
-        elif task_data.get("is_extended_hold"):
-            mood = AvatarMood.DEMANDING
-            prefix = ""
-        else:
-            mood = AvatarMood.COMMANDING
-            prefix = ""
-        
-        image_data = AvatarGenerator.generate_avatar(user, mood, db)
-        
-        full_message = f"{prefix}📋 YOUR TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
-        
-        dom_msg = ConversationMessage(
-            user_id=user.id,
-            message=full_message,
-            is_from_dom=True,
-            has_avatar=True,
-        )
-        db.add(dom_msg)
-        db.commit()
-        
-        if image_data:
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
-                caption=full_message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            await update.message.reply_text(
-                full_message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        
-        # Schedule check-ins if extended hold
-        if task_data.get("is_extended_hold"):
-            await schedule_task_checkins(user, task, db)
-        
-        # Schedule escalation check
-        scheduler.add_job(
-            lambda: asyncio.run(check_escalation_wrapper(str(update.effective_chat.id))),
-            trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
-            id=f"escalation_check_{update.effective_chat.id}",
-            replace_existing=True,
-        )
-                
-    except Exception as e:
-        logger.error(f"Process message error: {e}")
-    finally:
-        db.close()
-
-
-async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enhanced photo handler with AI verification"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        
-        photo_type = context.user_data.get("awaiting_photo_type", "task_completion")
-        task_id = context.user_data.get("awaiting_photo_task_id")
-        check_in_num = context.user_data.get("awaiting_checkin_num", 0)
-        
-        if not task_id:
-            await process_message(update, context)
-            return
-        
-        task = db.query(Task).filter(Task.id == task_id).first()
-        if not task:
-            await update.message.reply_text("Task not found.")
-            return
-        
-        if not update.message.photo:
-            await update.message.reply_text("No photo detected. Try again.")
-            return
-        
-        # Get photo
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        photo_bytes = await file.download_as_bytearray()
-        
-        # Show "analyzing" message
-        analyzing_msg = await update.message.reply_text("🔍 Analyzing your proof with AI...")
-        
-        # AI Verification
-        verification = await verify_photo_with_ai(user, task, photo_bytes, db)
-        
-        # Store AI analysis in task
-        task.ai_analysis = verification["analysis"]
-        task.ai_verified = verification["verified"]
-        
-        # Delete analyzing message
-        await analyzing_msg.delete()
-        
-        if photo_type == "checkin":
-            checkin = db.query(TaskCheckIn).filter(
-                TaskCheckIn.task_id == task_id,
-                TaskCheckIn.check_in_number == check_in_num
-            ).first()
-            if checkin:
-                checkin.response_received = True
-            
-            mood = AvatarMood.INSPECTING
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            if verification["verified"]:
-                msg = f"✓ CHECK-IN #{check_in_num} VERIFIED\n\nMy AI confirms you're still obeying. Continue holding position."
-            else:
-                msg = f"⚠️ CHECK-IN #{check_in_num}\n\nMy AI sees: {verification['analysis'][:100]}...\n\nYou'd better still be there."
-            
-            if image_data:
-                await update.message.reply_photo(
-                    photo=InputFile(io.BytesIO(image_data), filename="inspecting.jpg"),
-                    caption=msg,
-                )
-            else:
-                await update.message.reply_text(msg)
-            
-            db.commit()
-            
-        elif photo_type == "final_release":
-            task.status = TaskStatus.COMPLETED.value
-            task.completed_at = datetime.utcnow()
-            
-            user.completed_tasks += 1
-            user.current_streak += 1
-            user.consecutive_failures = 0
-            user.awaiting_response = False
-            user.reward_points += 10
-            
-            context.user_data.pop("awaiting_photo_type", None)
-            context.user_data.pop("awaiting_photo_task_id", None)
-            context.user_data.pop("awaiting_checkin_num", None)
-            
-            mood = AvatarMood.PLEASED if user.current_streak >= 3 else AvatarMood.COMMANDING
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            if verification["verified"]:
-                msg = f"✓ TASK COMPLETE - RELEASED\n\nMy AI confirms your obedience:\n{verification['analysis'][:150]}...\n\nYou're free. For now."
-            else:
-                msg = f"✓ TASK COMPLETE - RELEASED\n\nMy AI analysis: {verification['analysis'][:100]}...\n\nYou're free, but I'm watching you closer now."
-            
-            if image_data:
-                await update.message.reply_photo(
-                    photo=InputFile(io.BytesIO(image_data), filename="released.jpg"),
-                    caption=f"{msg}\n\n🔥 Streak: {user.current_streak} | ⭐ Points: +10",
-                )
-            else:
-                await update.message.reply_text(f"{msg}\n\n⭐ Points: +10")
-            
-            db.commit()
-            
-        else:
-            # Standard task completion with verification
-            task.photo_url = verification.get('cloudinary_url') or file.file_path
-            
-            if verification["verified"]:
-                task.status = TaskStatus.COMPLETED.value
-                task.completed_at = datetime.utcnow()
-                
-                user.completed_tasks += 1
-                user.current_streak += 1
-                user.consecutive_failures = 0
-                user.awaiting_response = False
-                user.reward_points += 5
-                
-                context.user_data.pop("awaiting_photo_type", None)
-                context.user_data.pop("awaiting_photo_task_id", None)
-                
-                mood = AvatarMood.PLEASED
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                
-                msg = f"✓ PROOF VERIFIED\n\nMy AI confirms you obeyed:\n{verification['analysis'][:200]}...\n\nGood pet. Task complete."
-                
-                if image_data:
-                    await update.message.reply_photo(
-                        photo=InputFile(io.BytesIO(image_data), filename="approved.jpg"),
-                        caption=f"{msg}\n\n🔥 Streak: {user.current_streak} | Confidence: {verification['confidence']}",
-                    )
-                else:
-                    await update.message.reply_text(f"{msg}\n\n🔥 Streak: {user.current_streak}")
-                
-                db.commit()
-                
-            else:
-                # Verification failed - punishment
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.current_streak = 0
-                user.awaiting_response = False
-                user.reward_points = max(0, user.reward_points - 10)
-                
-                context.user_data.pop("awaiting_photo_type", None)
-                context.user_data.pop("awaiting_photo_task_id", None)
-                
-                mood = AvatarMood.SUSPICIOUS
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                
-                msg = f"❌ VERIFICATION FAILED\n\nMy AI analysis:\n{verification['analysis'][:200]}...\n\nThis does NOT match your task. You will be punished."
-                
-                if image_data:
-                    await update.message.reply_photo(
-                        photo=InputFile(io.BytesIO(image_data), filename="suspicious.jpg"),
-                        caption=f"{msg}\n\n⭐ Points: -10 | Intensity increased",
-                    )
-                else:
-                    await update.message.reply_text(f"{msg}\n\n⭐ Points: -10")
-                
-                db.commit()
-            
-    except Exception as e:
-        logger.error(f"Photo handler error: {e}")
-        await update.message.reply_text("Error processing photo. Try again.")
-    finally:
-        db.close()
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enhanced button callback"""
-    query = update.callback_query
-    await query.answer()
-    
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        data = query.data
-        
-        # Location updates
-        if data.startswith("loc_"):
-            location_map = {
-                "loc_home": LocationType.HOME,
-                "loc_work": LocationType.WORK,
-                "loc_public": LocationType.PUBLIC,
-                "loc_transit": LocationType.TRANSIT,
-                "loc_social": LocationType.SOCIAL,
-            }
-            new_loc = location_map.get(data, LocationType.UNKNOWN)
-            user.current_location = new_loc.value
-            user.last_location_update = datetime.utcnow()
-            db.commit()
-            
-            # Ask for specific details
-            await query.edit_message_text(
-                f"📍 Location updated: {new_loc.value}\n\n"
-                f"Be more specific for better tasks:\n"
-                f"Send: /locationdetail bedroom\n"
-                f"Or: /locationdetail 'office alone'\n"
-                f"Or: /locationdetail 'car in parking lot'"
-            )
-            return
-        
-        # AVATAR HANDLERS
-        elif data.startswith("avatar_build_"):
-            build = data.replace("avatar_build_", "")
-            user.parameters.avatar_build = build
-            db.commit()
-            await query.edit_message_text(f"Build: {build}")
-            return
-        
-        elif data.startswith("avatar_hair_"):
-            length = data.replace("avatar_hair_", "")
-            user.parameters.avatar_hair_length = length
-            db.commit()
-            await query.edit_message_text(f"Hair length: {length}")
-            return
-        
-        elif data.startswith("avatar_color_"):
-            color = data.replace("avatar_color_", "")
-            user.parameters.avatar_hair_color = color
-            db.commit()
-            await query.edit_message_text(f"Hair color: {color}")
-            return
-        
-        elif data == "avatar_toggle":
-            user.parameters.avatar_enabled = not user.parameters.avatar_enabled
-            db.commit()
-            await query.edit_message_text(
-                f"Avatar {'enabled' if user.parameters.avatar_enabled else 'disabled'}"
-            )
-            return
-        
-        # Check-in photos
-        if data.startswith("checkinphoto_"):
-            parts = data.split("_")
-            task_id = int(parts[1])
-            check_in_num = int(parts[2])
-            
-            context.user_data["awaiting_photo_type"] = "checkin"
-            context.user_data["awaiting_photo_task_id"] = task_id
-            context.user_data["awaiting_checkin_num"] = check_in_num
-            
-            await query.edit_message_caption(
-                caption=f"{query.message.caption}\n\n📸 Awaiting check-in #{check_in_num} photo..."
-            )
-            return
-        
-        # Final release photo
-        if data.startswith("finalphoto_"):
-            task_id = int(data.split("_")[1])
-            
-            context.user_data["awaiting_photo_type"] = "final_release"
-            context.user_data["awaiting_photo_task_id"] = task_id
-            
-            await query.edit_message_caption(
-                caption=f"{query.message.caption}\n\n📸 Send final proof of your state..."
-            )
-            return
-        
-        # "I Moved" confession
-        if data.startswith("moved_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task:
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.current_streak = 0
-                user.awaiting_response = False
-                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-                db.commit()
-                
-                mood = AvatarMood.ANGRY if user.consecutive_failures > 1 else AvatarMood.DISAPPOINTED
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                msg = "You moved. You failed. Consequences incoming."
-                
-                if image_data:
-                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
-                    await bot.send_photo(
-                        chat_id=user.chat_id,
-                        photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"),
-                        caption="I'm disappointed. You'll need to be punished.",
-                    )
-                else:
-                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
-            return
-        
-        # Standard complete
-        if data.startswith("complete_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task and task.status == TaskStatus.PENDING.value:
-                if task.requires_photo:
-                    context.user_data["awaiting_photo_type"] = "task_completion"
-                    context.user_data["awaiting_photo_task_id"] = task_id
-                    
-                    await query.edit_message_caption(
-                        caption=f"{query.message.caption}\n\n📸 Complete the task and send photo proof. My AI will verify..."
-                    )
-                else:
-                    task.status = TaskStatus.COMPLETED.value
-                    task.completed_at = datetime.utcnow()
-                    user.completed_tasks += 1
-                    user.current_streak += 1
-                    db.commit()
-                    await query.edit_message_caption(caption="✓ Task completed!")
-            return
-        
-        # Alternative task acceptance
-        if data.startswith("complete_alt_"):
-            task_id = int(data.split("_")[2])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task:
-                context.user_data["awaiting_photo_type"] = "task_completion"
-                context.user_data["awaiting_photo_task_id"] = task_id
-                
-                await query.edit_message_caption(
-                    caption=f"{query.message.caption}\n\n📸 Complete the alternative task and send photo proof..."
-                )
-            return
-        
-        # Fail
-        if data.startswith("fail_"):
-            task_id = int(data.split("_")[1])
-            task = db.query(Task).filter(Task.id == task_id).first()
-            
-            if task and task.status == TaskStatus.PENDING.value:
-                task.status = TaskStatus.FAILED.value
-                user.failed_tasks += 1
-                user.consecutive_failures += 1
-                user.current_streak = 0
-                user.awaiting_response = False
-                user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-                db.commit()
-                
-                mood = AvatarMood.ANGRY if user.consecutive_failures > 2 else AvatarMood.DISAPPOINTED
-                image_data = AvatarGenerator.generate_avatar(user, mood, db)
-                msg = generate_ai_response(user, "My pet failed me. I am displeased.", db)
-                
-                if image_data:
-                    await query.edit_message_caption(caption=f"❌ TASK FAILED\n\n{msg}")
-                else:
-                    await query.edit_message_text(f"❌ TASK FAILED\n\n{msg}")
-            return
-        
-    except Exception as e:
-        logger.error(f"Callback error: {e}")
-    finally:
-        db.close()
-
-
-# ============================================================================
-# COMMANDS
-# ============================================================================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome = """Welcome, pet. I am your Dom.
-
-I learn. I adapt. I reward. I punish.
-I VERIFY with AI. My intelligence creates tasks for YOUR specific situation.
-
-Commands:
-/status - Your standing
-/location - Set your current location
-/locationdetail - Be specific (e.g., "bedroom", "office alone")
-/nightmode - Toggle or customize night mode
-/rewards - View your progress & milestones
-/redeem - Spend points on rewards
-/selfie - Request my image
-/avatar - Customize my appearance
-/analyze - Force learning analysis
-/privileges - View earned perks
-/release - Emergency release (with penalty)
-
-Obey me, and you will be rewarded. Fail me, and face consequences."""
-    await update.message.reply_text(welcome)
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        compliance = (
-            (user.completed_tasks / user.total_tasks * 100) if user.total_tasks > 0 else 0
-        )
-        location_str = user.current_location if user.current_location else "Unknown"
-        location_detail = f" ({user.location_detail})" if user.location_detail else ""
-        
-        text = f"""
-📊 Your Status, pet
-
-Intensity: {user.intensity.upper()}
-Location: {location_str}{location_detail}
-Tasks: {user.completed_tasks}/{user.total_tasks} ({compliance:.0f}%)
-Current Streak: 🔥 {user.current_streak} tasks
-Longest Streak: {user.longest_streak} tasks
-Reward Points: ⭐ {user.reward_points}
-
-AI Task Generation: {'Enabled' if user.location_detail else 'Set /locationdetail for better tasks'}
-
-Privileges: {', '.join(user.privileges) if user.privileges else 'None yet'}
-
-⚠️ My AI now verifies all photo proof
-"""
-        await update.message.reply_text(text)
-    finally:
-        db.close()
-
-
-async def location_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set current location"""
-    keyboard = [
-        [InlineKeyboardButton("🏠 Home", callback_data="loc_home")],
-        [InlineKeyboardButton("💼 Work", callback_data="loc_work")],
-        [InlineKeyboardButton("🌆 Public", callback_data="loc_public")],
-        [InlineKeyboardButton("🚗 Transit", callback_data="loc_transit")],
-        [InlineKeyboardButton("🎉 Social", callback_data="loc_social")],
-    ]
-    await update.message.reply_text(
-        "📍 Where are you right now, pet?\n\n"
-        "After selecting, use /locationdetail to be more specific\n"
-        "(e.g., 'bedroom', 'office alone', 'car in parking lot')",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def location_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set specific location details for contextual AI tasks"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        
-        if not context.args:
-            current = user.location_detail or "Not set"
-            await update.message.reply_text(
-                f"Current location detail: {current}\n\n"
-                f"Be specific so my AI can create contextual tasks:\n"
-                f"Examples:\n"
-                f"• /locationdetail bedroom\n"
-                f"• /locationdetail 'home office alone'\n"
-                f"• /locationdetail 'work bathroom'\n"
-                f"• /locationdetail 'car in parking garage'\n"
-                f"• /locationdetail 'Starbucks bathroom'"
-            )
-            return
-        
-        detail = " ".join(context.args)
-        user.location_detail = detail
-        db.commit()
-        
-        await update.message.reply_text(
-            f"📍 Location detail updated: {detail}\n\n"
-            f"My AI will now create tasks specific to this location!\n"
-            f"Next task will use: '{detail}'"
-        )
-    finally:
-        db.close()
-
-
-async def nightmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle night mode on/off"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        params = user.parameters
-        
-        if not context.args:
-            status = "ON" if params.night_mode_enabled else "OFF"
-            await update.message.reply_text(
-                f"🌙 Night mode: {status}\n"
-                f"Hours: {params.night_mode_start}:00 - {params.night_mode_end}:00 Mountain\n\n"
-                f"Commands:\n"
-                f"/nightmode on\n"
-                f"/nightmode off\n"
-                f"/nightmode setstart 22 (10pm)\n"
-                f"/nightmode setend 6 (6am)"
-            )
-            return
-        
-        action = context.args[0].lower()
-        
-        if action == "on":
-            params.night_mode_enabled = True
-            db.commit()
-            await update.message.reply_text(
-                f"🌙 Night mode ENABLED.\n"
-                f"No tasks from {params.night_mode_start}:00 to {params.night_mode_end}:00"
-            )
-            
-        elif action == "off":
-            params.night_mode_enabled = False
-            db.commit()
-            await update.message.reply_text("☀️ Night mode DISABLED. Tasks anytime.")
-            
-        elif action == "setstart" and len(context.args) > 1:
-            try:
-                hour = int(context.args[1])
-                if 0 <= hour <= 23:
-                    params.night_mode_start = hour
-                    db.commit()
-                    await update.message.reply_text(f"Night mode now starts at {hour}:00")
-                else:
-                    await update.message.reply_text("Hour must be 0-23")
-            except ValueError:
-                await update.message.reply_text("Use: /nightmode setstart 22")
-                
-        elif action == "setend" and len(context.args) > 1:
-            try:
-                hour = int(context.args[1])
-                if 0 <= hour <= 23:
-                    params.night_mode_end = hour
-                    db.commit()
-                    await update.message.reply_text(f"Night mode now ends at {hour}:00")
-                else:
-                    await update.message.reply_text("Hour must be 0-23")
-            except ValueError:
-                await update.message.reply_text("Use: /nightmode setend 6")
-        else:
-            await update.message.reply_text("Unknown command. Use: /nightmode on/off/setstart/setend")
-            
-    finally:
-        db.close()
-
-
-async def rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        next_milestone = None
-        for threshold in sorted(RewardSystem.REWARD_THRESHOLDS.keys()):
-            if threshold > user.completed_tasks:
-                next_milestone = threshold
-                break
-        
-        text = f"""
-🏆 Your Rewards 🏆
-
-🔥 Current Streak: {user.current_streak} tasks
-📈 Longest Streak: {user.longest_streak} tasks  
-✅ Total Completed: {user.completed_tasks}
-⭐ Reward Points: {user.reward_points}
-
-🎯 Next Milestone: {next_milestone} tasks
-"""
-        text += "\n📋 Upcoming Rewards:\n"
-        for threshold, data in sorted(RewardSystem.REWARD_THRESHOLDS.items()):
-            if threshold >= user.completed_tasks:
-                status = "✓" if threshold <= user.completed_tasks else "○"
-                text += f"{status} {threshold} tasks: {data['message'][:40]}...\n"
-        
-        recent = (
-            db.query(Reward)
-            .filter(Reward.user_id == user.id)
-            .order_by(desc(Reward.created_at))
-            .limit(3)
-            .all()
-        )
-        if recent:
-            text += "\n🎁 Recent Rewards:\n"
-            for r in recent:
-                text += f"• {r.description[:50]}\n"
-        text += "\nUse /redeem to spend points"
-        await update.message.reply_text(text)
-    finally:
-        db.close()
-
-
-async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        if not context.args:
-            await update.message.reply_text(
-                f"""💎 Redeem Points (You have: {user.reward_points}) 💎
-
-/redeem selfie (50 pts) - Custom selfie from me
-/redeem gentle (100 pts) - Reduce intensity 24h  
-/redeem choice (75 pts) - Choose next task type
-/redeem praise (25 pts) - Special praise message
-
-Earn points by completing tasks and maintaining streaks."""
-            )
-            return
-        
-        option = context.args[0].lower()
-        costs = {"selfie": 50, "gentle": 100, "choice": 75, "praise": 25}
-        
-        if option not in costs:
-            await update.message.reply_text("Invalid option. Use /redeem to see options.")
-            return
-        
-        if user.reward_points < costs[option]:
-            await update.message.reply_text(
-                f"Not enough points. You have {user.reward_points}. Complete more tasks."
-            )
-            return
-        
-        user.reward_points -= costs[option]
-        
-        if option == "selfie":
-            mood = random.choice(
-                [AvatarMood.SEDUCTIVE, AvatarMood.WORKOUT, AvatarMood.PLEASED]
-            )
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            if image_data:
-                await update.message.reply_photo(
-                    photo=InputFile(io.BytesIO(image_data), filename="dom_redeemed.jpg"),
-                    caption="You earned this. Enjoy it.",
-                )
-        elif option == "gentle":
-            user.intensity = IntensityLevel.LOW.value
-            await update.message.reply_text(
-                "24 hours of gentleness. Don't get used to it, pet."
-            )
-        elif option == "choice":
-            user.privileges.append("next_task_choice")
-            await update.message.reply_text(
-                "You may choose your next task. Reply with:\n/choose physical - for body tasks\n/choose mental - for mind tasks\n/choose service - for serving tasks"
-            )
-        elif option == "praise":
-            msg = RewardSystem.generate_reward_message(user, "proud")
-            await update.message.reply_text(f"🌟 {msg} 🌟\n\n(Redeemed with points)")
-        
-        db.commit()
-    finally:
-        db.close()
-
-
-async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        await update.message.reply_text("Generating my image...")
-        
-        if user.consecutive_failures > 0:
-            mood = AvatarMood.DISAPPOINTED
-        elif user.current_streak >= 7:
-            mood = AvatarMood.SEDUCTIVE
-        elif user.current_streak >= 3:
-            mood = AvatarMood.PLEASED
-        else:
-            mood = random.choice(list(AvatarMood))
-        
-        image_data = AvatarGenerator.generate_avatar(user, mood, db)
-        
-        if image_data:
-            captions = {
-                AvatarMood.PLEASED: "You've been good. I approve.",
-                AvatarMood.DISAPPOINTED: "I expect better from you.",
-                AvatarMood.ANGRY: "You test my patience.",
-                AvatarMood.COMMANDING: "Obey me.",
-                AvatarMood.SEDUCTIVE: "Come closer, pet.",
-                AvatarMood.WORKOUT: "This is what power looks like.",
-                AvatarMood.THOUGHTFUL: "I'm considering your next test...",
-                AvatarMood.DOMINANT: "You belong to me.",
-            }
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(image_data), filename="dom_selfie.jpg"),
-                caption=captions.get(mood, "Look at me."),
-            )
-        else:
-            await update.message.reply_text("Image generation failed. Try again.")
-    finally:
-        db.close()
-
-
-async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enhanced avatar customization"""
-    keyboard = [
-        [
-            InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
-            InlineKeyboardButton("Lean", callback_data="avatar_build_lean"),
-            InlineKeyboardButton("Twink", callback_data="avatar_build_twink"),
-        ],
-        [
-            InlineKeyboardButton("Short Hair", callback_data="avatar_hair_short"),
-            InlineKeyboardButton("Medium Hair", callback_data="avatar_hair_medium"),
-            InlineKeyboardButton("Long Hair", callback_data="avatar_hair_long"),
-        ],
-        [
-            InlineKeyboardButton("Black Hair", callback_data="avatar_color_black"),
-            InlineKeyboardButton("Blonde", callback_data="avatar_color_blonde"),
-            InlineKeyboardButton("Brunette", callback_data="avatar_color_brown"),
-        ],
-        [InlineKeyboardButton("Toggle Avatar", callback_data="avatar_toggle")],
-    ]
-    
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        params = user.parameters
-        
-        current = f"""
-Current Appearance:
-• Build: {params.avatar_build}
-• Hair Length: {params.avatar_hair_length}
-• Hair Color: {params.avatar_hair_color}
-• Ethnicity: {params.avatar_ethnicity}
-• Nationality: {params.avatar_nationality}
-• Age: {params.avatar_age_appearance}
-"""
-        await update.message.reply_text(
-            f"Customize how I appear to you, pet:\n{current}",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-    finally:
-        db.close()
-
-
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        await update.message.reply_text("Analyzing our dynamic...")
-        LearningEngine.analyze_user(db, user)
-        image_data = AvatarGenerator.generate_avatar(user, AvatarMood.THOUGHTFUL, db)
-        text = f"Analysis complete.\n\nRelationship Notes:\n{user.relationship_notes[:400] if user.relationship_notes else 'Still learning...'}"
-        
-        if image_data:
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(image_data), filename="dom_thinking.jpg"),
-                caption=text,
-            )
-        else:
-            await update.message.reply_text(text)
-    finally:
-        db.close()
-
-
-async def privileges_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        if not user.privileges:
-            await update.message.reply_text("No privileges earned yet. Obey more tasks.")
-            return
-        
-        privilege_descriptions = {
-            "late_response": "Extra 10 minutes to complete tasks",
-            "task_choice": "Can choose next task type",
-            "early_release": "Can end tasks 5 minutes early",
-            "photo_skip": "Can skip photo proof once per day",
-        }
-        
-        text = "👑 Your Earned Privileges 👑\n\n"
-        for priv in user.privileges:
-            desc = privilege_descriptions.get(priv, priv)
-            text += f"• {desc}\n"
-        
-        await update.message.reply_text(text)
-    finally:
-        db.close()
-
-
-async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Emergency release from current task"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, str(update.effective_chat.id))
-        
-        if not user.current_task_id:
-            await update.message.reply_text("You're not currently assigned a task.")
-            return
-        
-        task = db.query(Task).filter(Task.id == user.current_task_id).first()
-        if task and task.status in [TaskStatus.PENDING.value, TaskStatus.IN_PROGRESS.value]:
-            task.status = TaskStatus.RELEASED.value
-            task.completed_at = datetime.utcnow()
-            
-            user.failed_tasks += 1
-            user.consecutive_failures += 1
-            user.current_streak = 0
-            user.awaiting_response = False
-            user.reward_points = max(0, user.reward_points - 20)
-            
-            db.commit()
-            
-            mood = AvatarMood.DISAPPOINTED
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            msg = "You begged for release. Weak. Points deducted. You'll make this up to me."
-            
-            if image_data:
-                await update.message.reply_photo(
-                    photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"),
-                    caption=f"⚠️ EMERGENCY RELEASE\n\n{msg}\n\n⭐ Points: -20",
-                )
-            else:
-                await update.message.reply_text(f"⚠️ EMERGENCY RELEASE\n\n{msg}")
-        else:
-            await update.message.reply_text("No active task to release you from.")
-    finally:
-        db.close()
-
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await process_message(update, context, is_command=False)
-
-
-def schedule_next_message():
-    """Schedule next random message"""
-    try:
-        scheduler.remove_all_jobs()
-    except:
-        pass
-    
-    db = next(get_db())
-    user = get_or_create_user(db, USER_CHAT_ID)
-    params = user.parameters
-    
-    # Check night mode (user-configurable)
-    if params.night_mode_enabled:
-        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-        if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
-            # Schedule for end of night mode
-            next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0, second=0)
-            if current_hour >= params.night_mode_start:
-                next_time += timedelta(days=1)
-            
-            scheduler.add_job(
-                lambda: asyncio.run(send_scheduled_dom_message()),
-                trigger="date",
-                run_date=next_time,
-                id="dom_message",
-                replace_existing=True,
-            )
-            logger.info(f"Night mode active. Next message at {params.night_mode_end}:00.")
-            return
-    
-    minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
-    scheduler.add_job(
-        lambda: asyncio.run(send_scheduled_dom_message()),
-        trigger=IntervalTrigger(minutes=minutes),
-        id="dom_message",
-        replace_existing=True,
-    )
-    logger.info(f"Next message in {minutes} minutes")
-
-
-async def send_scheduled_dom_message():
-    """Send scheduled message"""
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, USER_CHAT_ID)
-        params = user.parameters
-        
-        # Night mode check (user-configurable)
-        if params.night_mode_enabled:
-            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
-                return
-        
-        if user.safe_word_active and user.safe_word_until and datetime.utcnow() < user.safe_word_until:
-            return
-        
-        if user.rest_day_until and datetime.utcnow() < user.rest_day_until:
-            return
-        
-        # Check location stale
-        location_stale = False
-        if user.last_location_update:
-            hours_since = (datetime.utcnow() - user.last_location_update).total_seconds() / 3600
-            if hours_since > params.stale_location_hours:
-                location_stale = True
-        
-        if location_stale:
-            keyboard = [
-                [InlineKeyboardButton("🏠 Home", callback_data="loc_home")],
-                [InlineKeyboardButton("💼 Work", callback_data="loc_work")],
-                [InlineKeyboardButton("🌆 Public", callback_data="loc_public")],
-            ]
-            await bot.send_message(
-                chat_id=USER_CHAT_ID,
-                text=f"📍 I don't know where you are (last updated {int(hours_since)} hours ago).\n\nTell me before I give you your next task.",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            return
-        
-        # Determine if task or conversation
-        is_task = random.random() > params.conversation_ratio
-        
-        if is_task:
-            # Generate task using SMART AI
-            task_data = await get_smart_task_for_user(user, db)
-            
-            deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
-            task = Task(
-                user_id=user.id,
-                description=task_data["description"],
-                task_type=task_data["task_type"],
-                requires_photo=task_data["requires_photo"],
-                intensity=task_data["difficulty"],
-                deadline=deadline,
-                is_extended_hold=task_data.get("is_extended_hold", False),
-                location_type=task_data.get("location_type", user.current_location),
-                ai_generated=task_data.get("ai_generated", False),
-            )
-            db.add(task)
-            db.commit()
-            db.refresh(task)
-            
-            user.total_tasks += 1
-            user.awaiting_response = True
-            user.current_task_id = task.id
-            
-            keyboard = [
-                [InlineKeyboardButton("✓ Task Complete", callback_data=f"complete_{task.id}")],
-                [InlineKeyboardButton("✗ I Failed", callback_data=f"fail_{task.id}")],
-            ]
-            
-            mood = AvatarMood.COMMANDING
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            ai_badge = "🤖 " if task_data.get("ai_generated") else ""
-            full_message = f"{ai_badge}📋 SCHEDULED TASK:\n{task_data['description']}\n\n⏰ Deadline: {params.task_timeout_minutes} minutes\n\n📸 PHOTO PROOF REQUIRED (AI Verified)"
-            
-            dom_msg = ConversationMessage(
-                user_id=user.id,
-                message=full_message,
-                is_from_dom=True,
-                has_avatar=True,
-            )
-            db.add(dom_msg)
-            db.commit()
-            
-            if image_data:
-                await bot.send_photo(
-                    chat_id=USER_CHAT_ID,
-                    photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
-                    caption=full_message,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            else:
-                await bot.send_message(
-                    chat_id=USER_CHAT_ID,
-                    text=full_message,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-            
-            if task_data.get("is_extended_hold"):
-                await schedule_task_checkins(user, task, db)
-            
-            scheduler.add_job(
-                lambda: asyncio.run(check_escalation_wrapper(USER_CHAT_ID)),
-                trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
-                id=f"escalation_check_{USER_CHAT_ID}",
-                replace_existing=True,
-            )
-        else:
-            # Conversation mode
-            ai_response = generate_conversation_response(user, db)
-            
-            dom_msg = ConversationMessage(
-                user_id=user.id,
-                message=ai_response,
-                is_from_dom=True,
-                has_avatar=True,
-            )
-            db.add(dom_msg)
-            db.commit()
-            
-            mood = random.choice([AvatarMood.FLIRTY, AvatarMood.CURIOUS, AvatarMood.MOCKING])
-            image_data = AvatarGenerator.generate_avatar(user, mood, db)
-            
-            if image_data:
-                await bot.send_photo(
-                    chat_id=USER_CHAT_ID,
-                    photo=InputFile(io.BytesIO(image_data), filename="dom_chat.jpg"),
-                    caption=ai_response,
-                )
-            else:
-                await bot.send_message(chat_id=USER_CHAT_ID, text=ai_response)
-        
-        schedule_next_message()
-        
-    except Exception as e:
-        logger.error(f"Scheduled message error: {e}")
-    finally:
-        db.close()
 
 
 def escalate_intensity(current: IntensityLevel) -> IntensityLevel:
@@ -2686,6 +911,592 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
 
 
 # ============================================================================
+# SCHEDULING
+# ============================================================================
+
+async def check_escalation(db: Session, user: UserState):
+    if not user.awaiting_response:
+        return
+    params = user.parameters
+    time_since = datetime.utcnow() - user.last_message_time
+    if time_since > timedelta(minutes=params.task_timeout_minutes):
+        user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
+        user.consecutive_failures += 1
+        user.current_streak = 0
+        db.commit()
+        await bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
+
+
+async def check_escalation_wrapper(chat_id: str):
+    db = next(get_db())
+    user = get_or_create_user(db, chat_id)
+    await check_escalation(db, user)
+
+
+# ============================================================================
+# MESSAGE HANDLERS
+# ============================================================================
+
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        params = user.parameters
+        
+        # Night mode check
+        if params.night_mode_enabled:
+            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+                if update.message.text:
+                    ai_response = generate_ai_response(user, update.message.text, db)
+                    await update.message.reply_text(f"🌙 Night Mode. {ai_response}")
+                return
+        
+        user_text = update.message.text if update.message.text else "[image]"
+        
+        # Check understanding mode
+        if user.current_task_id and check_understanding_mode(user_text):
+            task = db.query(Task).filter(Task.id == user.current_task_id).first()
+            if task and task.status == TaskStatus.PENDING.value:
+                alt = offer_alternative_task(user, task, db)
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.reward_points = max(0, user.reward_points - 15)
+                db.commit()
+                await update.message.reply_text(f"😈 MERCY:\n\n{alt['description']}")
+                return
+        
+        # Log message
+        user_msg = ConversationMessage(user_id=user.id, message=user_text, is_from_dom=False)
+        db.add(user_msg)
+        user.interaction_count += 1
+        db.commit()
+        
+        # Check stale location
+        if user.last_location_update:
+            hours_since = (datetime.utcnow() - user.last_location_update).total_seconds() / 3600
+            if hours_since > params.stale_location_hours and not is_command:
+                keyboard = [
+                    [InlineKeyboardButton("🏠 Home", callback_data="loc_home")],
+                    [InlineKeyboardButton("💼 Work", callback_data="loc_work")],
+                ]
+                await update.message.reply_text(
+                    f"📍 Location stale ({int(hours_since)}h). Update?",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                return
+        
+        # Conversation or task?
+        is_conversation = random.random() < params.conversation_ratio
+        
+        if is_conversation and not is_command:
+            ai_response = generate_conversation_response(user, db)
+            dom_msg = ConversationMessage(user_id=user.id, message=ai_response, is_from_dom=True)
+            db.add(dom_msg)
+            db.commit()
+            
+            if random.random() < params.avatar_frequency:
+                image_data = AvatarGenerator.generate_avatar(user, AvatarGenerator.determine_mood(user, "conversation"), db)
+                if image_data:
+                    await update.message.reply_photo(
+                        photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
+                        caption=ai_response,
+                    )
+                else:
+                    await update.message.reply_text(ai_response)
+            else:
+                await update.message.reply_text(ai_response)
+            return
+        
+        # Generate AI task
+        task_data = await get_smart_task_for_user(user, db)
+        
+        # Create task
+        deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
+        task = Task(
+            user_id=user.id,
+            description=task_data["description"],
+            task_type=task_data["task_type"],
+            requires_photo=True,
+            intensity=task_data["difficulty"],
+            deadline=deadline,
+            is_extended_hold=task_data.get("is_extended_hold", False),
+            location_type=task_data.get("location_type", user.current_location),
+            ai_generated=task_data.get("ai_generated", False),
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        
+        user.total_tasks += 1
+        user.awaiting_response = True
+        user.current_task_id = task.id
+        
+        keyboard = [
+            [InlineKeyboardButton("✓ Complete", callback_data=f"complete_{task.id}")],
+            [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task.id}")],
+        ]
+        
+        # Build caption with truncation
+        ai_badge = "🤖 " if task_data.get("ai_generated") else ""
+        description = truncate_for_telegram(task_data['description'], 600)
+        full_message = truncate_for_telegram(
+            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 PHOTO REQUIRED",
+            950
+        )
+        
+        image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
+        
+        if image_data:
+            await update.message.reply_photo(
+                photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
+                caption=full_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await update.message.reply_text(full_message, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        scheduler.add_job(
+            lambda: asyncio.run(check_escalation_wrapper(str(update.effective_chat.id))),
+            trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
+            id=f"escalation_{update.effective_chat.id}",
+            replace_existing=True,
+        )
+                
+    except Exception as e:
+        logger.error(f"Process message error: {e}")
+    finally:
+        db.close()
+
+
+async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        photo_type = context.user_data.get("awaiting_photo_type", "task_completion")
+        task_id = context.user_data.get("awaiting_photo_task_id")
+        
+        if not task_id:
+            await process_message(update, context)
+            return
+        
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            await update.message.reply_text("Task not found.")
+            return
+        
+        if not update.message.photo:
+            await update.message.reply_text("No photo detected.")
+            return
+        
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        photo_bytes = await file.download_as_bytearray()
+        
+        analyzing_msg = await update.message.reply_text("🔍 Claude analyzing...")
+        
+        # Use Claude-3-Opus for verification
+        verification = await verify_photo_with_claude(user, task, photo_bytes, db)
+        
+        task.ai_analysis = verification["analysis"]
+        task.ai_verified = verification["verified"]
+        
+        await analyzing_msg.delete()
+        
+        if verification["verified"]:
+            task.status = TaskStatus.COMPLETED.value
+            task.completed_at = datetime.utcnow()
+            user.completed_tasks += 1
+            user.current_streak += 1
+            user.consecutive_failures = 0
+            user.awaiting_response = False
+            user.reward_points += 5
+            
+            context.user_data.pop("awaiting_photo_type", None)
+            context.user_data.pop("awaiting_photo_task_id", None)
+            
+            msg = truncate_for_telegram(f"✓ CLAUDE VERIFIED\n\n{verification['analysis'][:250]}", 900)
+            
+            image_data = AvatarGenerator.generate_avatar(user, AvatarMood.PLEASED, db)
+            if image_data:
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(image_data), filename="approved.jpg"),
+                    caption=f"{msg}\n\n🔥 Streak: {user.current_streak}",
+                )
+            else:
+                await update.message.reply_text(f"{msg}\n\n🔥 Streak: {user.current_streak}")
+            
+            db.commit()
+            
+        else:
+            task.status = TaskStatus.FAILED.value
+            user.failed_tasks += 1
+            user.consecutive_failures += 1
+            user.current_streak = 0
+            user.awaiting_response = False
+            user.reward_points = max(0, user.reward_points - 10)
+            
+            context.user_data.pop("awaiting_photo_type", None)
+            context.user_data.pop("awaiting_photo_task_id", None)
+            
+            msg = truncate_for_telegram(f"❌ CLAUDE REJECTED\n\n{verification['analysis'][:250]}", 900)
+            
+            image_data = AvatarGenerator.generate_avatar(user, AvatarMood.SUSPICIOUS, db)
+            if image_data:
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(image_data), filename="suspicious.jpg"),
+                    caption=f"{msg}\n\n⭐ -10 points",
+                )
+            else:
+                await update.message.reply_text(f"{msg}\n\n⭐ -10 points")
+            
+            db.commit()
+            
+    except Exception as e:
+        logger.error(f"Photo handler error: {e}")
+        await update.message.reply_text("Error processing photo.")
+    finally:
+        db.close()
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        data = query.data
+        
+        if data.startswith("loc_"):
+            location_map = {
+                "loc_home": LocationType.HOME,
+                "loc_work": LocationType.WORK,
+                "loc_public": LocationType.PUBLIC,
+                "loc_transit": LocationType.TRANSIT,
+            }
+            new_loc = location_map.get(data, LocationType.UNKNOWN)
+            user.current_location = new_loc.value
+            user.last_location_update = datetime.utcnow()
+            db.commit()
+            await query.edit_message_text(f"📍 {new_loc.value}\n\nUse /locationdetail")
+            return
+        
+        elif data.startswith("avatar_build_"):
+            user.parameters.avatar_build = data.replace("avatar_build_", "")
+            db.commit()
+            await query.edit_message_text("Build updated")
+            return
+        
+        elif data.startswith("avatar_hair_"):
+            user.parameters.avatar_hair_length = data.replace("avatar_hair_", "")
+            db.commit()
+            await query.edit_message_text("Hair updated")
+            return
+        
+        elif data.startswith("avatar_color_"):
+            user.parameters.avatar_hair_color = data.replace("avatar_color_", "")
+            db.commit()
+            await query.edit_message_text("Color updated")
+            return
+        
+        elif data == "avatar_toggle":
+            user.parameters.avatar_enabled = not user.parameters.avatar_enabled
+            db.commit()
+            await query.edit_message_text(f"Avatar: {'on' if user.parameters.avatar_enabled else 'off'}")
+            return
+        
+        if data.startswith("complete_"):
+            task_id = int(data.split("_")[1])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task and task.status == TaskStatus.PENDING.value:
+                context.user_data["awaiting_photo_type"] = "task_completion"
+                context.user_data["awaiting_photo_task_id"] = task_id
+                
+                await query.edit_message_caption(
+                    caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send photo", 950)
+                )
+            return
+        
+        if data.startswith("fail_"):
+            task_id = int(data.split("_")[1])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if task:
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.consecutive_failures += 1
+                user.current_streak = 0
+                user.awaiting_response = False
+                db.commit()
+                await query.edit_message_caption(caption="❌ FAILED")
+            return
+        
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+    finally:
+        db.close()
+
+
+# ============================================================================
+# COMMANDS
+# ============================================================================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me"
+    )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        loc_detail = f" ({user.location_detail})" if user.location_detail else ""
+        
+        text = f"""
+📊 Status
+Location: {user.current_location}{loc_detail}
+Tasks: {user.completed_tasks}/{user.total_tasks}
+Streak: 🔥 {user.current_streak}
+Points: ⭐ {user.reward_points}
+AI Tasks: {'On' if user.location_detail else 'Set /locationdetail'}
+Claude Verification: ✅
+Ectomorph Twink: ✅
+"""
+        await update.message.reply_text(text)
+    finally:
+        db.close()
+
+
+async def location_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🏠 Home", callback_data="loc_home")],
+        [InlineKeyboardButton("💼 Work", callback_data="loc_work")],
+        [InlineKeyboardButton("🌆 Public", callback_data="loc_public")],
+    ]
+    await update.message.reply_text("📍 Where?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def location_detail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        if not context.args:
+            current = user.location_detail or "Not set"
+            await update.message.reply_text(f"Current: {current}\n\n/locationdetail bedroom\n/locationdetail 'office alone'")
+            return
+        
+        detail = " ".join(context.args)
+        user.location_detail = detail
+        db.commit()
+        await update.message.reply_text(f"📍 Set: {detail}\nAI tasks will use this!")
+    finally:
+        db.close()
+
+
+async def nightmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        params = user.parameters
+        
+        if not context.args:
+            status = "ON" if params.night_mode_enabled else "OFF"
+            await update.message.reply_text(f"Night: {status} ({params.night_mode_start}:00-{params.night_mode_end}:00)")
+            return
+        
+        action = context.args[0].lower()
+        
+        if action == "on":
+            params.night_mode_enabled = True
+            db.commit()
+            await update.message.reply_text("🌙 ON")
+        elif action == "off":
+            params.night_mode_enabled = False
+            db.commit()
+            await update.message.reply_text("☀️ OFF")
+        elif action == "setstart" and len(context.args) > 1:
+            params.night_mode_start = int(context.args[1])
+            db.commit()
+            await update.message.reply_text(f"Start: {params.night_mode_start}:00")
+        elif action == "setend" and len(context.args) > 1:
+            params.night_mode_end = int(context.args[1])
+            db.commit()
+            await update.message.reply_text(f"End: {params.night_mode_end}:00")
+    finally:
+        db.close()
+
+
+async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        await update.message.reply_text("Generating ectomorph twink...")
+        
+        mood = AvatarMood.PLEASED if user.current_streak >= 3 else AvatarMood.COMMANDING
+        image_data = AvatarGenerator.generate_avatar(user, mood, db)
+        
+        if image_data:
+            await update.message.reply_photo(
+                photo=InputFile(io.BytesIO(image_data), filename="dom.jpg"),
+                caption="Here I am, pet.",
+            )
+        else:
+            await update.message.reply_text("Failed.")
+    finally:
+        db.close()
+
+
+async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
+            InlineKeyboardButton("Lean", callback_data="avatar_build_lean"),
+            InlineKeyboardButton("Twink", callback_data="avatar_build_twink"),
+        ],
+        [
+            InlineKeyboardButton("Short", callback_data="avatar_hair_short"),
+            InlineKeyboardButton("Long", callback_data="avatar_hair_long"),
+        ],
+        [
+            InlineKeyboardButton("Black", callback_data="avatar_color_black"),
+            InlineKeyboardButton("Blonde", callback_data="avatar_color_blonde"),
+        ],
+        [InlineKeyboardButton("Toggle", callback_data="avatar_toggle")],
+    ]
+    await update.message.reply_text("Customize:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        if not user.current_task_id:
+            await update.message.reply_text("No active task.")
+            return
+        
+        task = db.query(Task).filter(Task.id == user.current_task_id).first()
+        if task:
+            task.status = TaskStatus.RELEASED.value
+            user.failed_tasks += 1
+            user.reward_points = max(0, user.reward_points - 20)
+            db.commit()
+            await update.message.reply_text("⚠️ Released. -20 points.")
+    finally:
+        db.close()
+
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_message(update, context, is_command=False)
+
+
+def schedule_next_message():
+    try:
+        scheduler.remove_all_jobs()
+    except:
+        pass
+    
+    db = next(get_db())
+    user = get_or_create_user(db, USER_CHAT_ID)
+    params = user.parameters
+    
+    if params.night_mode_enabled:
+        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+        if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+            next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0)
+            if current_hour >= params.night_mode_start:
+                next_time += timedelta(days=1)
+            
+            scheduler.add_job(
+                lambda: asyncio.run(send_scheduled_message()),
+                trigger="date",
+                run_date=next_time,
+                id="dom_message",
+            )
+            return
+    
+    minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
+    scheduler.add_job(
+        lambda: asyncio.run(send_scheduled_message()),
+        trigger=IntervalTrigger(minutes=minutes),
+        id="dom_message",
+    )
+
+
+async def send_scheduled_message():
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, USER_CHAT_ID)
+        params = user.parameters
+        
+        if params.night_mode_enabled:
+            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+                return
+        
+        task_data = await get_smart_task_for_user(user, db)
+        
+        deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
+        task = Task(
+            user_id=user.id,
+            description=task_data["description"],
+            task_type=task_data["task_type"],
+            requires_photo=True,
+            intensity=task_data["difficulty"],
+            deadline=deadline,
+            ai_generated=task_data.get("ai_generated", False),
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        
+        user.total_tasks += 1
+        user.awaiting_response = True
+        user.current_task_id = task.id
+        db.commit()
+        
+        keyboard = [
+            [InlineKeyboardButton("✓ Complete", callback_data=f"complete_{task.id}")],
+            [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task.id}")],
+        ]
+        
+        ai_badge = "🤖 " if task_data.get("ai_generated") else ""
+        description = truncate_for_telegram(task_data['description'], 600)
+        full_message = truncate_for_telegram(
+            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 PHOTO REQUIRED",
+            950
+        )
+        
+        image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
+        
+        if image_data:
+            await bot.send_photo(
+                chat_id=USER_CHAT_ID,
+                photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
+                caption=full_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            await bot.send_message(
+                chat_id=USER_CHAT_ID,
+                text=full_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        
+        schedule_next_message()
+        
+    except Exception as e:
+        logger.error(f"Scheduled message error: {e}")
+    finally:
+        db.close()
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -2695,28 +1506,19 @@ def main():
     
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # Command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("location", location_command))
     application.add_handler(CommandHandler("locationdetail", location_detail_command))
     application.add_handler(CommandHandler("nightmode", nightmode_command))
-    application.add_handler(CommandHandler("rewards", rewards_command))
-    application.add_handler(CommandHandler("redeem", redeem_command))
     application.add_handler(CommandHandler("selfie", selfie_command))
     application.add_handler(CommandHandler("avatar", avatar_command))
-    application.add_handler(CommandHandler("analyze", analyze_command))
-    application.add_handler(CommandHandler("privileges", privileges_command))
     application.add_handler(CommandHandler("release", release_command))
-    
-    # Callback handler
     application.add_handler(CallbackQueryHandler(button_callback))
-    
-    # Message handlers
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v3.0 with AI Task Generation started. I am watching...")
+    logger.info("Dom Bot v4.0 - Claude Opus + Ectomorph Twink")
     application.run_polling()
 
 
