@@ -5,6 +5,7 @@ import json
 import re
 import io
 import base64
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -56,7 +57,6 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# FIXED: Added pool_size and max_overflow to prevent pool timeout
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -1947,42 +1947,66 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ============================================================================
-# MAIN - FIXED WITH TIMEOUT CONFIGURATION
+# MAIN - FIXED WITH TIMEOUT CONFIGURATION AND CRASH PROTECTION
 # ============================================================================
 
 def main():
-    scheduler.start()
-    schedule_next_message()
-    
-    # FIXED: Add timeout configuration to prevent crashes
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .read_timeout(30)      # HTTP read timeout
-        .write_timeout(30)     # HTTP write timeout
-        .connect_timeout(30)   # Connection timeout
-        .pool_timeout(30)      # Connection pool timeout
-        .build()
-    )
-    
-    # Add error handler
-    application.add_error_handler(error_handler)
-    
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("location", location_command))
-    application.add_handler(CommandHandler("locationdetail", location_detail_command))
-    application.add_handler(CommandHandler("nightmode", nightmode_command))
-    application.add_handler(CommandHandler("selfie", selfie_command))
-    application.add_handler(CommandHandler("avatar", avatar_command))
-    application.add_handler(CommandHandler("setfrequency", setfrequency_command))
-    application.add_handler(CommandHandler("release", release_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    logger.info("Dom Bot v4.4 - Timeout Protection + Crash Resilience")
-    application.run_polling()
+    """Main function with crash protection and auto-restart"""
+    while True:
+        try:
+            scheduler.start()
+            schedule_next_message()
+            
+            # FIXED: Add timeout configuration to prevent crashes
+            application = (
+                Application.builder()
+                .token(TELEGRAM_BOT_TOKEN)
+                .read_timeout(30)      # HTTP read timeout
+                .write_timeout(30)     # HTTP write timeout
+                .connect_timeout(30)   # Connection timeout
+                .pool_timeout(30)      # Connection pool timeout
+                .build()
+            )
+            
+            # Add error handler
+            application.add_error_handler(error_handler)
+            
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("status", status_command))
+            application.add_handler(CommandHandler("location", location_command))
+            application.add_handler(CommandHandler("locationdetail", location_detail_command))
+            application.add_handler(CommandHandler("nightmode", nightmode_command))
+            application.add_handler(CommandHandler("selfie", selfie_command))
+            application.add_handler(CommandHandler("avatar", avatar_command))
+            application.add_handler(CommandHandler("setfrequency", setfrequency_command))
+            application.add_handler(CommandHandler("release", release_command))
+            application.add_handler(CallbackQueryHandler(button_callback))
+            application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+            
+            logger.info("Dom Bot v4.5 - Timeout Protection + Auto-Restart")
+            
+            # FIXED: Add run_polling timeouts
+            application.run_polling(
+                poll_interval=1.0,           # Check every 1 second
+                timeout=30,                  # Long polling timeout
+                drop_pending_updates=True,   # Skip old messages on restart
+                read_timeout=30,             # HTTP read timeout
+                write_timeout=30,            # HTTP write timeout
+                connect_timeout=30,          # Connection timeout
+                pool_timeout=30,             # Pool timeout
+            )
+            
+        except Exception as e:
+            logger.critical(f"Fatal error, restarting in 10 seconds: {e}", exc_info=True)
+            # Stop scheduler before restart
+            try:
+                scheduler.shutdown()
+            except:
+                pass
+            time.sleep(10)
+            logger.info("Restarting bot...")
+            continue  # Restart loop
 
 
 if __name__ == "__main__":
