@@ -56,7 +56,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -151,8 +151,8 @@ class BotParameters(Base):
     response_delay_enabled = Column(Boolean, default=True)
     min_response_delay_seconds = Column(Integer, default=2)
     max_response_delay_seconds = Column(Integer, default=10)
-    min_interval_minutes = Column(Integer, default=60)   # For /setfrequency
-    max_interval_minutes = Column(Integer, default=180)  # For /setfrequency
+    min_interval_minutes = Column(Integer, default=60)
+    max_interval_minutes = Column(Integer, default=180)
     active_hours_start = Column(Integer, default=8)
     active_hours_end = Column(Integer, default=20)
     preferred_task_types = Column(JSON, default=list)
@@ -465,8 +465,8 @@ async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: byt
     # Convert to base64 for Claude vision
     photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
     
-    # Build verification prompt
-    prompt = f"""You are verifying BDSM task completion. Analyze this photo carefully.
+    # Build verification prompt - FIXED: Clarify this is a selfie
+    prompt = f"""You are verifying BDSM task completion. This photo is a SELFIE taken by the submissive holding their phone in one hand.
 
 TASK REQUIREMENTS:
 "{task.description}"
@@ -476,20 +476,27 @@ USER CONTEXT:
 - Specific location: {user.location_detail or 'not specified'}
 - Intensity level: {user.intensity}
 - Time: {datetime.utcnow().strftime('%H:%M')} UTC
+- PHOTO TYPE: Selfie (one hand holding phone, arm visible in frame)
 
 ANALYSIS INSTRUCTIONS:
 1. Does the photo show the requested nudity/exposure level?
-2. Is the position/pose as commanded?
-3. Does the setting match the task location?
-4. Is there evidence of obedience/compliance?
-5. Any signs of faking or incorrect completion?
+2. Is the position/pose as commanded? (Remember: selfies have limited angles)
+3. Can you see their arm/hand holding the phone? (Expected for selfies)
+4. Does the setting match the task location?
+5. Is there evidence of obedience/compliance?
+
+SELFIE REALITY CHECK:
+- Selfies are taken at arm's length or in mirrors
+- One hand is holding the phone (may be visible in frame)
+- Angles are limited to what a person can reach
+- Background context matters more than perfect framing
 
 Respond in this exact format:
 VERDICT: [VERIFIED or FAILED]
 CONFIDENCE: [high/medium/low]
 ANALYSIS: [Your detailed explanation of what you see]
 
-Be strict but fair. If they clearly attempted the task, verify it. If they're fully clothed in a "strip naked" task, fail it."""
+Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, not professional photography."""
 
     try:
         response = requests.post(
@@ -639,11 +646,11 @@ def get_conversational_verification_response(verified: bool, confidence: str, an
 
 
 # ============================================================================
-# AI TASK GENERATION
+# AI TASK GENERATION - FIXED FOR SELFIES
 # ============================================================================
 
 async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
-    """Generate AI task based on user's specific situation"""
+    """Generate AI task based on user's specific situation - FIXED FOR SELFIES"""
     
     location = user.current_location or "unknown"
     location_detail = user.location_detail or ""
@@ -660,21 +667,39 @@ async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
     else:
         time_period = "night"
     
+    # FIXED: Prompt explicitly states photos must be selfies (one hand holding phone)
     prompt = f"""Create a specific BDSM task (MAX 350 CHARACTERS).
+
+CRITICAL: The photo must be a SELFIE taken by the submissive holding their phone in ONE HAND.
 
 CONTEXT:
 - Location: {location} ({location_detail if location_detail else 'be specific with typical rooms/furniture'})
 - Time: {time_period}
 - Intensity: {intensity}
 
-RULES:
-- Be extremely specific using actual surroundings
-- Use furniture, rooms, objects they have
-- Include exact position, dress state, photo angle
-- Max 350 characters - concise and commanding
-- Make it creatively challenging
+SELFIE CONSTRAINTS (MUST FOLLOW):
+- One hand holds the phone (arm may be visible in frame)
+- Angles limited to arm's reach or mirror selfies
+- Cannot require photos from impossible angles (behind them, from ceiling, etc.)
+- Must be achievable with one hand free
 
-Example good: "Strip naked in your bedroom. Kneel on the bed facing the wall. Photo from doorway showing your back and the room. 12 min."
+VALID SELFIE ANGLES:
+- Mirror selfie (front/side view)
+- Selfie at arm's length (face/chest view)
+- Downward angle showing body
+- Lower body selfie from above
+- Floor-level selfie (phone on floor, timer mode allowed)
+
+RULES:
+- Be specific using actual surroundings
+- Use furniture, rooms, objects they have
+- Include exact position, dress state
+- Max 350 characters - concise and commanding
+- Make it creatively challenging but PHYSICALLY POSSIBLE as a selfie
+
+Example good: "Strip naked in your bedroom. Kneel facing the mirror. Selfie showing your reflection and the room. 12 min."
+
+Example bad: "Photo from behind showing your back" (impossible as selfie without timer)
 
 TASK:"""
 
@@ -686,8 +711,8 @@ TASK:"""
         if len(ai_description) > 350:
             ai_description = ai_description[:347] + "..."
         
-        if "photo" not in ai_description.lower():
-            ai_description += " Photo proof."
+        if "photo" not in ai_description.lower() and "selfie" not in ai_description.lower():
+            ai_description += " Selfie proof."
         
         is_extended_hold = any(phrase in ai_description.lower() for phrase in 
             ["until i say", "do not move", "hold position", "stay there", "wait for", "kneel until"])
@@ -704,8 +729,9 @@ TASK:"""
         
     except Exception as e:
         logger.error(f"AI task generation failed: {e}")
+        # FIXED: Template tasks are selfie-friendly
         return {
-            "description": f"Strip naked at your {location}. Kneel and take photo. {user.parameters.task_timeout_minutes} minutes.",
+            "description": f"Strip naked at your {location}. Kneel facing mirror. Selfie showing reflection. {user.parameters.task_timeout_minutes} minutes.",
             "task_type": location,
             "requires_photo": True,
             "is_extended_hold": False,
@@ -716,7 +742,7 @@ TASK:"""
 
 
 async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
-    """Choose between AI or template task"""
+    """Choose between AI or template task - FIXED FOR SELFIES"""
     params = user.parameters
     
     has_details = user.location_detail and len(user.location_detail) > 3
@@ -726,10 +752,11 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
         return await generate_contextual_ai_task(user, db)
     else:
         location = user.current_location or "home"
+        # FIXED: All templates are selfie-friendly
         templates = {
-            "home": "Strip naked. Kneel facing wall. Photo from behind. {timeout} min.",
-            "work": "Office bathroom: strip, photo showing logo. {timeout} min.",
-            "public": "Bathroom: strip, photo showing mirror. {timeout} min.",
+            "home": "Strip naked. Kneel facing mirror. Selfie showing your front. {timeout} min.",
+            "work": "Office bathroom: strip, mirror selfie. {timeout} min.",
+            "public": "Bathroom: strip, selfie in mirror. {timeout} min.",
         }
         template = templates.get(location, templates["home"])
         return {
@@ -741,6 +768,36 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
             "difficulty": user.intensity,
             "ai_generated": False,
         }
+
+
+# ============================================================================
+# EXPIRE OLD TASKS - FIXED
+# ============================================================================
+
+async def expire_old_tasks(user: UserState, db: Session):
+    """Mark old pending tasks as expired and clear current_task_id - FIXED"""
+    # Find tasks older than timeout that are still pending
+    cutoff = datetime.utcnow() - timedelta(minutes=user.parameters.task_timeout_minutes + 5)
+    
+    old_tasks = db.query(Task).filter(
+        Task.user_id == user.id,
+        Task.status == TaskStatus.PENDING.value,
+        Task.created_at < cutoff
+    ).all()
+    
+    for task in old_tasks:
+        task.status = TaskStatus.EXPIRED.value
+        logger.info(f"Expired old task {task.id} from {task.created_at}")
+    
+    # If current_task_id points to an expired/completed/failed task, clear it
+    if user.current_task_id:
+        current_task = db.query(Task).filter(Task.id == user.current_task_id).first()
+        if not current_task or current_task.status in [TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.EXPIRED.value, TaskStatus.RELEASED.value]:
+            user.current_task_id = None
+            user.awaiting_response = False
+            logger.info(f"Cleared stale current_task_id for user {user.id}")
+    
+    db.commit()
 
 
 # ============================================================================
@@ -1068,7 +1125,7 @@ def check_understanding_mode(user_message: str) -> bool:
 
 def offer_alternative_task(user: UserState, original_task: Task, db: Session) -> dict:
     return {
-        "description": "ALTERNATIVE: Strip to underwear. Photo in mirror. -15 points.",
+        "description": "ALTERNATIVE: Strip to underwear. Selfie in mirror. -15 points.",
         "task_type": "alternative",
         "requires_photo": True,
         "is_extended_hold": False,
@@ -1091,18 +1148,19 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
 
 
 # ============================================================================
-# SCHEDULING
+# SCHEDULING - FIXED WITH PROPER DB CLOSING
 # ============================================================================
 
 async def check_escalation(db: Session, user: UserState):
+    """Check if task has expired - FIXED with null check"""
     if not user.awaiting_response:
         return
-    params = user.parameters
     
-    # FIX: Check if last_message_time is None
+    # FIXED: Check if last_message_time is None
     if user.last_message_time is None:
         return
     
+    params = user.parameters
     time_since = datetime.utcnow() - user.last_message_time
     if time_since > timedelta(minutes=params.task_timeout_minutes):
         user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
@@ -1113,13 +1171,17 @@ async def check_escalation(db: Session, user: UserState):
 
 
 async def check_escalation_wrapper(chat_id: str):
-    db = next(get_db())
-    user = get_or_create_user(db, chat_id)
-    await check_escalation(db, user)
+    """Wrapper with proper DB handling - FIXED"""
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, chat_id)
+        await check_escalation(db, user)
+    finally:
+        db.close()
 
 
 # ============================================================================
-# MESSAGE HANDLERS
+# MESSAGE HANDLERS - FIXED WITH EXPIRE OLD TASKS
 # ============================================================================
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
@@ -1127,6 +1189,9 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
         params = user.parameters
+        
+        # FIXED: Expire old tasks and clear stale current_task_id
+        await expire_old_tasks(user, db)
         
         # Night mode check
         if params.night_mode_enabled:
@@ -1226,7 +1291,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         ai_badge = "🤖 " if task_data.get("ai_generated") else ""
         description = truncate_for_telegram(task_data['description'], 600)
         full_message = truncate_for_telegram(
-            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 PHOTO REQUIRED",
+            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 SELFIE REQUIRED",
             950
         )
         
@@ -1258,6 +1323,9 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
     db = SessionLocal()
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        # FIXED: Expire old tasks first
+        await expire_old_tasks(user, db)
         
         photo_type = context.user_data.get("awaiting_photo_type", "task_completion")
         task_id = context.user_data.get("awaiting_photo_task_id")
@@ -1297,6 +1365,7 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.consecutive_failures = 0
             user.awaiting_response = False
             user.reward_points += 5
+            user.current_task_id = None  # FIXED: Clear current task
             
             context.user_data.pop("awaiting_photo_type", None)
             context.user_data.pop("awaiting_photo_task_id", None)
@@ -1327,6 +1396,7 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.current_streak = 0
             user.awaiting_response = False
             user.reward_points = max(0, user.reward_points - 10)
+            user.current_task_id = None  # FIXED: Clear current task
             
             context.user_data.pop("awaiting_photo_type", None)
             context.user_data.pop("awaiting_photo_task_id", None)
@@ -1364,6 +1434,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        # FIXED: Expire old tasks
+        await expire_old_tasks(user, db)
+        
         data = query.data
         
         if data.startswith("loc_"):
@@ -1456,7 +1530,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data["awaiting_photo_task_id"] = task_id
                 
                 await query.edit_message_caption(
-                    caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send photo", 950)
+                    caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send selfie", 950)
                 )
             return
         
@@ -1470,6 +1544,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.consecutive_failures += 1
                 user.current_streak = 0
                 user.awaiting_response = False
+                user.current_task_id = None  # FIXED: Clear current task
                 db.commit()
                 await query.edit_message_caption(caption="❌ FAILED")
             return
@@ -1498,6 +1573,17 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         race = getattr(user.parameters, 'avatar_race', 'white')
         hair = getattr(user.parameters, 'avatar_hair_color', 'black')
         
+        # FIXED: Show current task info
+        current_task_info = ""
+        if user.current_task_id:
+            task = db.query(Task).filter(Task.id == user.current_task_id).first()
+            if task and task.status == TaskStatus.PENDING.value:
+                time_left = task.deadline - datetime.utcnow()
+                minutes_left = max(0, int(time_left.total_seconds() / 60))
+                current_task_info = f"\n⏳ Active task: {minutes_left}m left"
+            else:
+                current_task_info = "\n✅ No active task"
+        
         text = f"""
 📊 Status
 Location: {user.current_location}{loc_detail}
@@ -1507,7 +1593,7 @@ Streak: 🔥 {user.current_streak}
 Points: ⭐ {user.reward_points}
 Frequency: Every {user.parameters.min_interval_minutes}-{user.parameters.max_interval_minutes} min
 AI Tasks: {'On' if user.location_detail else 'Set /locationdetail'}
-Claude: claude-opus-4-8-fast
+Claude: claude-opus-4-8-fast{current_task_info}
 """
         await update.message.reply_text(text)
     finally:
@@ -1680,6 +1766,8 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task.status = TaskStatus.RELEASED.value
             user.failed_tasks += 1
             user.reward_points = max(0, user.reward_points - 20)
+            user.current_task_id = None  # FIXED: Clear current task
+            user.awaiting_response = False
             db.commit()
             await update.message.reply_text("⚠️ Released. -20 points.")
     finally:
@@ -1690,45 +1778,57 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_message(update, context, is_command=False)
 
 
+# ============================================================================
+# SCHEDULING - FIXED WITH PROPER DB CLOSING
+# ============================================================================
+
 def schedule_next_message():
+    """Schedule next message with proper DB handling - FIXED"""
     try:
         scheduler.remove_all_jobs()
     except:
         pass
     
-    db = next(get_db())
-    user = get_or_create_user(db, USER_CHAT_ID)
-    params = user.parameters
-    
-    # Check if disabled
-    if params.min_interval_minutes >= 99999:
-        logger.info("Scheduled messages disabled")
-        return
-    
-    if params.night_mode_enabled:
-        current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-        if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
-            next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0)
-            if current_hour >= params.night_mode_start:
-                next_time += timedelta(days=1)
-            
-            scheduler.add_job(
-                lambda: asyncio.run(send_scheduled_message()),
-                trigger="date",
-                run_date=next_time,
-                id="dom_message",
-            )
+    # FIXED: Use SessionLocal directly with explicit close
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, USER_CHAT_ID)
+        params = user.parameters
+        
+        # Check if disabled
+        if params.min_interval_minutes >= 99999:
+            logger.info("Scheduled messages disabled")
             return
-    
-    minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
-    scheduler.add_job(
-        lambda: asyncio.run(send_scheduled_message()),
-        trigger=IntervalTrigger(minutes=minutes),
-        id="dom_message",
-    )
+        
+        if params.night_mode_enabled:
+            current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
+            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
+                next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0)
+                if current_hour >= params.night_mode_start:
+                    next_time += timedelta(days=1)
+                
+                scheduler.add_job(
+                    lambda: asyncio.run(send_scheduled_message()),
+                    trigger="date",
+                    run_date=next_time,
+                    id="dom_message",
+                )
+                logger.info(f"Scheduled for after night mode: {next_time}")
+                return
+        
+        minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
+        scheduler.add_job(
+            lambda: asyncio.run(send_scheduled_message()),
+            trigger=IntervalTrigger(minutes=minutes),
+            id="dom_message",
+        )
+        logger.info(f"Scheduled next message in {minutes} minutes")
+    finally:
+        db.close()  # ALWAYS CLOSE
 
 
 async def send_scheduled_message():
+    """Send scheduled message with proper DB handling - FIXED"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1742,6 +1842,9 @@ async def send_scheduled_message():
             current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
             if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
                 return
+        
+        # FIXED: Expire old tasks before creating new one
+        await expire_old_tasks(user, db)
         
         task_data = await get_smart_task_for_user(user, db)
         
@@ -1772,7 +1875,7 @@ async def send_scheduled_message():
         ai_badge = "🤖 " if task_data.get("ai_generated") else ""
         description = truncate_for_telegram(task_data['description'], 600)
         full_message = truncate_for_telegram(
-            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 PHOTO REQUIRED",
+            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 SELFIE REQUIRED",
             950
         )
         
@@ -1797,7 +1900,7 @@ async def send_scheduled_message():
     except Exception as e:
         logger.error(f"Scheduled message error: {e}")
     finally:
-        db.close()
+        db.close()  # ALWAYS CLOSE
 
 
 # ============================================================================
@@ -1823,7 +1926,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v4.2 - Frequency Control + 6 Builds + Conversational Verification")
+    logger.info("Dom Bot v4.3 - DB Pool Fix + Selfie Tasks + Expire Old Tasks")
     application.run_polling()
 
 
