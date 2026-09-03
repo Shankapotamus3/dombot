@@ -168,6 +168,7 @@ class BotParameters(Base):
     avatar_hair_length = Column(String, default="short")
     avatar_hair_color = Column(String, default="black")
     avatar_age_appearance = Column(String, default="28")
+    avatar_race = Column(String, default="white")  # FIXED: Added race column
     
     rewards_enabled = Column(Boolean, default=True)
     reward_frequency = Column(Float, default=0.1)
@@ -353,11 +354,39 @@ def truncate_for_telegram(text: str, max_length: int = 950) -> str:
 
 
 # ============================================================================
-# CLAUDE-3 OPUS VERIFICATION THROUGH VENICE
+# RACE OPTIONS
+# ============================================================================
+
+RACE_OPTIONS = {
+    "white": {
+        "description": "White / Caucasian",
+        "prompt_addon": "white skin, Caucasian features"
+    },
+    "black": {
+        "description": "Black / African",
+        "prompt_addon": "black skin, African features, dark complexion"
+    },
+    "asian": {
+        "description": "Asian",
+        "prompt_addon": "Asian features, East Asian or Southeast Asian appearance"
+    },
+    "hispanic": {
+        "description": "Hispanic / Latino",
+        "prompt_addon": "Hispanic features, Latino skin tone, Latin appearance"
+    },
+    "mixed": {
+        "description": "Mixed / Ambiguous",
+        "prompt_addon": "mixed race features, ambiguous ethnicity"
+    }
+}
+
+
+# ============================================================================
+# CLAUDE-3 OPUS VERIFICATION THROUGH VENICE - FIXED MODEL
 # ============================================================================
 
 async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
-    """Verify photo using Claude-3-Opus through Venice AI"""
+    """Verify photo using Claude-3-Opus through Venice AI - FIXED MODEL NAME"""
     
     # Upload to Cloudinary
     cloudinary_url = None
@@ -410,7 +439,7 @@ Be strict but fair. If they clearly attempted the task, verify it. If they're fu
                 "Content-Type": "application/json",
             },
             json={
-                "model": "claude-3-opus-20240229",  # Claude-3-Opus through Venice
+                "model": "claude-opus-4-8-fast",  # FIXED: Changed from claude-3-opus-20240229
                 "messages": [
                     {
                         "role": "user",
@@ -577,7 +606,7 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
 
 
 # ============================================================================
-# ENHANCED AVATAR GENERATOR WITH ECTOMORPH TWINK
+# ENHANCED AVATAR GENERATOR WITH FIXED ECTOMORPH TWINK
 # ============================================================================
 
 class AvatarGenerator:
@@ -682,20 +711,33 @@ class AvatarGenerator:
 
     @staticmethod
     def build_prompt(user: UserState, mood: AvatarMood) -> str:
+        """Build avatar prompt with FIXED descriptors and race support"""
         params = user.parameters
         mood_data = AvatarGenerator.MOOD_PROMPTS.get(
             mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING]
         )
         
-        # ECTOMORPH TWINK BUILD - EXTREMELY SKINNY
+        # Get race (default to white if not set)
+        race = getattr(params, 'avatar_race', 'white')
+        
+        race_descriptor = {
+            "white": "white skin, Caucasian",
+            "black": "black skin, African",
+            "asian": "Asian features",
+            "hispanic": "Hispanic, Latino",
+            "mixed": "mixed race",
+        }.get(race, "Caucasian")
+        
+        # FIXED: Ectomorph descriptors that don't trigger anatomical/x-ray rendering
+        # FIXED: Explicit "young man" to ensure male gender
         if params.avatar_build == "twink":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} ectomorph twink, extremely skinny slender physique, visible ribcage, prominent hip bones, narrow waist, delicate feminine build, smooth hairless body, lithe and willowy frame, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old young man, {race_descriptor} ectomorph twink, very slim lean build, flat toned stomach, narrow waist, youthful thin body, smooth hairless skin, slender arms, lithe frame, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         elif params.avatar_build == "muscular":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, muscular defined physique, powerful build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old young man, {race_descriptor}, muscular defined physique, powerful build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         elif params.avatar_build == "lean":
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, lean toned physique, athletic build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old young man, {race_descriptor}, lean toned physique, athletic build, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         else:
-            physical = f"{params.avatar_age_appearance}-year-old {params.avatar_ethnicity} {params.avatar_nationality} man, {params.avatar_build}, {params.avatar_hair_length} {params.avatar_hair_color} hair"
+            physical = f"{params.avatar_age_appearance}-year-old young man, {race_descriptor}, {params.avatar_build}, {params.avatar_hair_length} {params.avatar_hair_color} hair"
         
         prompt = f"{params.avatar_style} photograph of a dominant {physical}, {mood_data['description']}, {mood_data['clothing']}, {mood_data['expression']}, {mood_data['setting']}, highly detailed, professional lighting, 4k quality, full body visible head to toe"
         return prompt
@@ -809,7 +851,7 @@ RULES:
 
 
 def generate_ai_response(user: UserState, user_message: str, db: Session) -> str:
-    """Generate AI response using Claude through Venice"""
+    """Generate AI response using Claude through Venice - FIXED MODEL"""
     try:
         system_prompt = build_adaptive_system_prompt(user, db)
         
@@ -842,7 +884,7 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
                 "Content-Type": "application/json",
             },
             json={
-                "model": "claude-3-opus-20240229",  # Use Claude for conversation too
+                "model": "claude-opus-4-8-fast",  # FIXED: Changed from claude-3-opus-20240229
                 "messages": messages,
                 "temperature": 0.9,
                 "max_tokens": 300,
@@ -1183,10 +1225,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📍 {new_loc.value}\n\nUse /locationdetail")
             return
         
+        # FIXED: Race selection first
+        elif data.startswith("avatar_race_"):
+            race = data.replace("avatar_race_", "")
+            context.user_data['selected_race'] = race
+            
+            # Now show build options
+            keyboard = [
+                [
+                    InlineKeyboardButton("Twink (Slim)", callback_data="avatar_build_twink"),
+                    InlineKeyboardButton("Lean", callback_data="avatar_build_lean"),
+                    InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
+                ],
+            ]
+            await query.edit_message_text(f"Race: {race.title()}\n\nChoose build:", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        
+        # FIXED: Build selection with race
         elif data.startswith("avatar_build_"):
-            user.parameters.avatar_build = data.replace("avatar_build_", "")
+            build = data.replace("avatar_build_", "")
+            race = context.user_data.get('selected_race', 'white')
+            user.parameters.avatar_build = build
+            user.parameters.avatar_race = race
             db.commit()
-            await query.edit_message_text("Build updated")
+            await query.edit_message_text(f"Set: {race.title()} {build}")
             return
         
         elif data.startswith("avatar_hair_"):
@@ -1246,7 +1308,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me"
+        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me (race + build)"
     )
 
 
@@ -1255,16 +1317,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
         loc_detail = f" ({user.location_detail})" if user.location_detail else ""
+        race = getattr(user.parameters, 'avatar_race', 'white')
         
         text = f"""
 📊 Status
 Location: {user.current_location}{loc_detail}
+Race: {race.title()}
+Build: {user.parameters.avatar_build}
 Tasks: {user.completed_tasks}/{user.total_tasks}
 Streak: 🔥 {user.current_streak}
 Points: ⭐ {user.reward_points}
 AI Tasks: {'On' if user.location_detail else 'Set /locationdetail'}
-Claude Verification: ✅
-Ectomorph Twink: ✅
+Claude Verification: ✅ claude-opus-4-8-fast
+Ectomorph Twink: ✅ Fixed descriptors
 """
         await update.message.reply_text(text)
     finally:
@@ -1335,7 +1400,8 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = SessionLocal()
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
-        await update.message.reply_text("Generating ectomorph twink...")
+        race = getattr(user.parameters, 'avatar_race', 'white')
+        await update.message.reply_text(f"Generating {race} {user.parameters.avatar_build}...")
         
         mood = AvatarMood.PLEASED if user.current_streak >= 3 else AvatarMood.COMMANDING
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
@@ -1352,23 +1418,15 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """FIXED: Two-step avatar selection - race first, then build"""
     keyboard = [
-        [
-            InlineKeyboardButton("Muscular", callback_data="avatar_build_muscular"),
-            InlineKeyboardButton("Lean", callback_data="avatar_build_lean"),
-            InlineKeyboardButton("Twink", callback_data="avatar_build_twink"),
-        ],
-        [
-            InlineKeyboardButton("Short", callback_data="avatar_hair_short"),
-            InlineKeyboardButton("Long", callback_data="avatar_hair_long"),
-        ],
-        [
-            InlineKeyboardButton("Black", callback_data="avatar_color_black"),
-            InlineKeyboardButton("Blonde", callback_data="avatar_color_blonde"),
-        ],
-        [InlineKeyboardButton("Toggle", callback_data="avatar_toggle")],
+        [InlineKeyboardButton("White", callback_data="avatar_race_white")],
+        [InlineKeyboardButton("Black", callback_data="avatar_race_black")],
+        [InlineKeyboardButton("Asian", callback_data="avatar_race_asian")],
+        [InlineKeyboardButton("Hispanic", callback_data="avatar_race_hispanic")],
+        [InlineKeyboardButton("Mixed", callback_data="avatar_race_mixed")],
     ]
-    await update.message.reply_text("Customize:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Choose ethnicity:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1518,7 +1576,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v4.0 - Claude Opus + Ectomorph Twink")
+    logger.info("Dom Bot v4.1 - Claude Opus Fast + Fixed Ectomorph + Race Selection")
     application.run_polling()
 
 
