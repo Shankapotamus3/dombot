@@ -56,6 +56,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# FIXED: Added pool_size and max_overflow to prevent pool timeout
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -465,8 +466,8 @@ async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: byt
     # Convert to base64 for Claude vision
     photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
     
-    # Build verification prompt - FIXED: Clarify this is a selfie
-    prompt = f"""You are verifying BDSM task completion. This photo is a SELFIE taken by the submissive holding their phone in one hand.
+    # Build verification prompt
+    prompt = f"""You are verifying BDSM task completion. This photo is a SELFIE taken by the submissive holding their phone in ONE HAND.
 
 TASK REQUIREMENTS:
 "{task.description}"
@@ -955,6 +956,7 @@ class AvatarGenerator:
             
             prompt = AvatarGenerator.build_prompt(user, mood)
             
+            # FIXED: Smaller image size (512x512) and added timeout
             response = requests.post(
                 VENICE_IMAGE_URL,
                 headers={
@@ -964,11 +966,11 @@ class AvatarGenerator:
                 json={
                     "model": "chroma",
                     "prompt": prompt,
-                    "width": 768,
-                    "height": 512,
+                    "width": 512,      # FIXED: Reduced from 768
+                    "height": 512,   # FIXED: Square format
                     "seed": random.randint(1, 1000000),
                 },
-                timeout=60,
+                timeout=30,  # FIXED: Added timeout
             )
             if response.status_code == 200:
                 image_data = response.json().get("images", [None])[0]
@@ -1779,7 +1781,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED WITH PROPER DB CLOSING
+# SCHEDULING - FIXED WITH PROPER DB CLOSING AND TIMEOUT PROTECTION
 # ============================================================================
 
 def schedule_next_message():
@@ -1828,7 +1830,7 @@ def schedule_next_message():
 
 
 async def send_scheduled_message():
-    """Send scheduled message with proper DB handling - FIXED"""
+    """Send scheduled message with crash protection - FIXED"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1879,39 +1881,92 @@ async def send_scheduled_message():
             950
         )
         
+        # FIXED: Send with timeout protection and retry
         image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
         
-        if image_data:
-            await bot.send_photo(
-                chat_id=USER_CHAT_ID,
-                photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
-                caption=full_message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            await bot.send_message(
-                chat_id=USER_CHAT_ID,
-                text=full_message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+        sent = False
+        for attempt in range(3):  # 3 retries
+            try:
+                if image_data:
+                    await bot.send_photo(
+                        chat_id=USER_CHAT_ID,
+                        photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
+                        caption=full_message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        read_timeout=60,
+                        write_timeout=60,
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=USER_CHAT_ID,
+                        text=full_message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                sent = True
+                break
+            except Exception as e:
+                logger.warning(f"Send attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)  # 2, 4 seconds backoff
+        
+        if not sent:
+            logger.error("Failed to send scheduled message after 3 attempts")
+            # Try text-only fallback
+            try:
+                await bot.send_message(
+                    chat_id=USER_CHAT_ID,
+                    text="📋 Task waiting. Check your messages.",
+                )
+            except:
+                pass
         
         schedule_next_message()
         
     except Exception as e:
         logger.error(f"Scheduled message error: {e}")
+        # Don't crash - just log and try again next interval
     finally:
         db.close()  # ALWAYS CLOSE
 
 
 # ============================================================================
-# MAIN
+# ERROR HANDLER - FIXED
+# ============================================================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors and prevent crashes - FIXED"""
+    logger.error(f"Exception while handling update: {context.error}")
+    
+    # Don't crash on timeouts
+    if "TimedOut" in str(context.error) or "timeout" in str(context.error).lower():
+        logger.warning("Telegram timeout - continuing...")
+        return
+    
+    # Log other errors but don't crash
+    logger.error(f"Error details: {context.error}", exc_info=True)
+
+
+# ============================================================================
+# MAIN - FIXED WITH TIMEOUT CONFIGURATION
 # ============================================================================
 
 def main():
     scheduler.start()
     schedule_next_message()
     
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # FIXED: Add timeout configuration to prevent crashes
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .read_timeout(30)      # HTTP read timeout
+        .write_timeout(30)     # HTTP write timeout
+        .connect_timeout(30)   # Connection timeout
+        .pool_timeout(30)      # Connection pool timeout
+        .build()
+    )
+    
+    # Add error handler
+    application.add_error_handler(error_handler)
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
@@ -1926,7 +1981,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v4.3 - DB Pool Fix + Selfie Tasks + Expire Old Tasks")
+    logger.info("Dom Bot v4.4 - Timeout Protection + Crash Resilience")
     application.run_polling()
 
 
