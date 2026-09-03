@@ -1098,6 +1098,11 @@ async def check_escalation(db: Session, user: UserState):
     if not user.awaiting_response:
         return
     params = user.parameters
+    
+    # FIX: Check if last_message_time is None
+    if user.last_message_time is None:
+        return
+    
     time_since = datetime.utcnow() - user.last_message_time
     if time_since > timedelta(minutes=params.task_timeout_minutes):
         user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
