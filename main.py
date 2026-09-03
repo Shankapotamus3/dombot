@@ -392,7 +392,7 @@ async def verify_photo_with_ai(user: UserState, task: Task, photo_bytes: bytes, 
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.3-70b",  # Using text model with image
+                "model": "claude-opus-5",  # Using text model with image
                 "messages": [
                     {
                         "role": "user",
