@@ -1858,7 +1858,9 @@ def send_scheduled_message_safe():
 
 
 async def send_scheduled_message():
-    """Send scheduled message - same as before but async"""
+    """Send scheduled message - FIXED: Close DB before slow operations"""
+    
+    # PHASE 1: Get all data from DB quickly, then CLOSE connection
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1894,61 +1896,68 @@ async def send_scheduled_message():
         user.current_task_id = task.id
         db.commit()
         
-        keyboard = [
-            [InlineKeyboardButton("✓ Complete", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task.id}")],
-        ]
+        # EXTRACT all data we need BEFORE closing DB
+        task_id = task.id
+        task_description = task_data["description"]
+        task_ai_generated = task_data.get("ai_generated", False)
+        timeout_minutes = params.task_timeout_minutes
         
-        ai_badge = "🤖 " if task_data.get("ai_generated") else ""
-        description = truncate_for_telegram(task_data['description'], 600)
-        full_message = truncate_for_telegram(
-            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 SELFIE REQUIRED",
-            950
-        )
-        
+        # Generate avatar while DB is still open (needs user object)
         image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
         
-        sent = False
-        for attempt in range(3):
-            try:
-                if image_data:
-                    await bot.send_photo(
-                        chat_id=USER_CHAT_ID,
-                        photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
-                        caption=full_message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                        read_timeout=60,
-                        write_timeout=60,
-                    )
-                else:
-                    await bot.send_message(
-                        chat_id=USER_CHAT_ID,
-                        text=full_message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                sent = True
-                break
-            except Exception as e:
-                logger.warning(f"Send attempt {attempt + 1} failed: {e}")
-                if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
-        
-        if not sent:
-            logger.error("Failed to send scheduled message after 3 attempts")
-            try:
+    finally:
+        db.close()  # CLOSE DB HERE - before slow Telegram operations
+    
+    # PHASE 2: Now do slow operations with CLOSED DB connection
+    keyboard = [
+        [InlineKeyboardButton("✓ Complete", callback_data=f"complete_{task_id}")],
+        [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task_id}")],
+    ]
+    
+    ai_badge = "🤖 " if task_ai_generated else ""
+    description = truncate_for_telegram(task_description, 600)
+    full_message = truncate_for_telegram(
+        f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {timeout_minutes} min\n\n📸 SELFIE REQUIRED",
+        950
+    )
+    
+    sent = False
+    for attempt in range(3):
+        try:
+            if image_data:
+                await bot.send_photo(
+                    chat_id=USER_CHAT_ID,
+                    photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
+                    caption=full_message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    read_timeout=60,
+                    write_timeout=60,
+                )
+            else:
                 await bot.send_message(
                     chat_id=USER_CHAT_ID,
-                    text="📋 Task waiting. Check your messages.",
+                    text=full_message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
-            except:
-                pass
-        
-        schedule_next_message()
-        
-    except Exception as e:
-        logger.error(f"Scheduled message error: {e}")
-    finally:
-        db.close()
+            sent = True
+            break
+        except Exception as e:
+            logger.warning(f"Send attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                await asyncio.sleep(2 ** attempt)
+    
+    if not sent:
+        logger.error("Failed to send scheduled message after 3 attempts")
+        try:
+            await bot.send_message(
+                chat_id=USER_CHAT_ID,
+                text="📋 Task waiting. Check your messages.",
+            )
+        except:
+            pass
+    
+    # PHASE 3: Schedule next message (opens new DB connection briefly)
+    schedule_next_message()
 
 
 # ============================================================================
