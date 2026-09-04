@@ -1790,17 +1790,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED WITH PROPER DB CLOSING AND TIMEOUT PROTECTION
+# SCHEDULING - FIXED: CLOSE DB BEFORE SCHEDULING JOB
 # ============================================================================
 
 def schedule_next_message():
-    """Schedule next message with proper DB handling - FIXED"""
+    """Schedule next message - FIXED to close DB BEFORE scheduling job"""
     try:
         scheduler.remove_all_jobs()
     except:
         pass
     
-    # FIXED: Use SessionLocal directly with explicit close
+    # Get params FIRST, close DB, THEN schedule
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1809,33 +1809,43 @@ def schedule_next_message():
         # Check if disabled
         if params.min_interval_minutes >= 99999:
             logger.info("Scheduled messages disabled")
-            return
+            return None  # Return early indicator
         
+        # Calculate timing while we have DB open
         if params.night_mode_enabled:
             current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
-            if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
-                next_time = datetime.utcnow().replace(hour=(params.night_mode_end + 7) % 24, minute=0)
-                if current_hour >= params.night_mode_start:
-                    next_time += timedelta(days=1)
-                
-                scheduler.add_job(
-                    lambda: asyncio.run(send_scheduled_message()),
-                    trigger="date",
-                    run_date=next_time,
-                    id="dom_message",
-                )
-                logger.info(f"Scheduled for after night mode: {next_time}")
-                return
-        
+            is_night = current_hour >= params.night_mode_start or current_hour < params.night_mode_end
+        else:
+            is_night = False
+            
         minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
+        
+        # Store values needed for scheduling
+        night_mode_end = params.night_mode_end
+        
+    finally:
+        db.close()  # CLOSE BEFORE SCHEDULING - THIS IS THE FIX
+    
+    # Now schedule with CLOSED connection
+    if is_night:
+        next_time = datetime.utcnow().replace(hour=(night_mode_end + 7) % 24, minute=0)
+        if current_hour >= night_mode_end:
+            next_time += timedelta(days=1)
+        
+        scheduler.add_job(
+            lambda: asyncio.run(send_scheduled_message()),
+            trigger="date",
+            run_date=next_time,
+            id="dom_message",
+        )
+        logger.info(f"Scheduled for after night mode: {next_time}")
+    else:
         scheduler.add_job(
             lambda: asyncio.run(send_scheduled_message()),
             trigger=IntervalTrigger(minutes=minutes),
             id="dom_message",
         )
         logger.info(f"Scheduled next message in {minutes} minutes")
-    finally:
-        db.close()  # ALWAYS CLOSE
 
 
 async def send_scheduled_message():
@@ -1993,7 +2003,7 @@ def main():
             application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
             
-            logger.info("Dom Bot v4.6 - Pool Size Fix + Auto-Restart")
+            logger.info("Dom Bot v4.7 - DB Close Before Schedule Fix")
             
             # FIXED: Add run_polling timeouts
             application.run_polling(
