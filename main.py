@@ -5,7 +5,6 @@ import json
 import re
 import io
 import base64
-import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -57,15 +56,15 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# FIXED: Dramatically increased pool size and added recycling
+# FIXED: Connection pool settings
 engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True, 
-    pool_size=20,           # Increased from 10
-    max_overflow=50,        # Increased from 20
-    pool_recycle=3600,      # Recycle connections after 1 hour
-    pool_timeout=60,        # Wait up to 60 seconds for connection
-    pool_reset_on_return=True,  # Reset connections when returned to pool
+    pool_size=20,
+    max_overflow=50,
+    pool_recycle=3600,
+    pool_timeout=60,
+    pool_reset_on_return=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -975,11 +974,11 @@ class AvatarGenerator:
                 json={
                     "model": "chroma",
                     "prompt": prompt,
-                    "width": 512,      # FIXED: Reduced from 768
-                    "height": 512,   # FIXED: Square format
+                    "width": 512,
+                    "height": 512,
                     "seed": random.randint(1, 1000000),
                 },
-                timeout=30,  # FIXED: Added timeout
+                timeout=30,
             )
             if response.status_code == 200:
                 image_data = response.json().get("images", [None])[0]
@@ -1790,11 +1789,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED: CLOSE DB BEFORE SCHEDULING JOB
+# SCHEDULING - FIXED: THREAD-SAFE WITH PROPER EVENT LOOP HANDLING
 # ============================================================================
 
 def schedule_next_message():
-    """Schedule next message - FIXED to close DB BEFORE scheduling job"""
+    """Schedule next message - FIXED for thread safety"""
     try:
         scheduler.remove_all_jobs()
     except:
@@ -1806,10 +1805,9 @@ def schedule_next_message():
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # Check if disabled
         if params.min_interval_minutes >= 99999:
             logger.info("Scheduled messages disabled")
-            return None  # Return early indicator
+            return
         
         # Calculate timing while we have DB open
         if params.night_mode_enabled:
@@ -1819,12 +1817,10 @@ def schedule_next_message():
             is_night = False
             
         minutes = random.randint(params.min_interval_minutes, params.max_interval_minutes)
-        
-        # Store values needed for scheduling
         night_mode_end = params.night_mode_end
         
     finally:
-        db.close()  # CLOSE BEFORE SCHEDULING - THIS IS THE FIX
+        db.close()  # CLOSE BEFORE SCHEDULING
     
     # Now schedule with CLOSED connection
     if is_night:
@@ -1833,7 +1829,7 @@ def schedule_next_message():
             next_time += timedelta(days=1)
         
         scheduler.add_job(
-            lambda: asyncio.run(send_scheduled_message()),
+            send_scheduled_message_safe,  # FIXED: Use wrapper function
             trigger="date",
             run_date=next_time,
             id="dom_message",
@@ -1841,21 +1837,32 @@ def schedule_next_message():
         logger.info(f"Scheduled for after night mode: {next_time}")
     else:
         scheduler.add_job(
-            lambda: asyncio.run(send_scheduled_message()),
+            send_scheduled_message_safe,  # FIXED: Use wrapper function
             trigger=IntervalTrigger(minutes=minutes),
             id="dom_message",
         )
         logger.info(f"Scheduled next message in {minutes} minutes")
 
 
+def send_scheduled_message_safe():
+    """Thread-safe wrapper for scheduled message - FIXED"""
+    try:
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(send_scheduled_message())
+        loop.close()
+    except Exception as e:
+        logger.error(f"Scheduled message failed: {e}")
+
+
 async def send_scheduled_message():
-    """Send scheduled message with crash protection - FIXED"""
+    """Send scheduled message - same as before but async"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # Check if disabled
         if params.min_interval_minutes >= 99999:
             return
         
@@ -1864,9 +1871,7 @@ async def send_scheduled_message():
             if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
                 return
         
-        # FIXED: Expire old tasks before creating new one
         await expire_old_tasks(user, db)
-        
         task_data = await get_smart_task_for_user(user, db)
         
         deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
@@ -1900,11 +1905,10 @@ async def send_scheduled_message():
             950
         )
         
-        # FIXED: Send with timeout protection and retry
         image_data = AvatarGenerator.generate_avatar(user, AvatarMood.COMMANDING, db)
         
         sent = False
-        for attempt in range(3):  # 3 retries
+        for attempt in range(3):
             try:
                 if image_data:
                     await bot.send_photo(
@@ -1926,11 +1930,10 @@ async def send_scheduled_message():
             except Exception as e:
                 logger.warning(f"Send attempt {attempt + 1} failed: {e}")
                 if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)  # 2, 4 seconds backoff
+                    await asyncio.sleep(2 ** attempt)
         
         if not sent:
             logger.error("Failed to send scheduled message after 3 attempts")
-            # Try text-only fallback
             try:
                 await bot.send_message(
                     chat_id=USER_CHAT_ID,
@@ -1943,9 +1946,8 @@ async def send_scheduled_message():
         
     except Exception as e:
         logger.error(f"Scheduled message error: {e}")
-        # Don't crash - just log and try again next interval
     finally:
-        db.close()  # ALWAYS CLOSE
+        db.close()
 
 
 # ============================================================================
@@ -1966,66 +1968,51 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ============================================================================
-# MAIN - FIXED WITH TIMEOUT CONFIGURATION AND CRASH PROTECTION
+# MAIN - FIXED: NO WHILE LOOP, NO MULTIPLE INSTANCES
 # ============================================================================
 
 def main():
-    """Main function with crash protection and auto-restart"""
-    while True:
-        try:
-            scheduler.start()
-            schedule_next_message()
-            
-            # FIXED: Add timeout configuration to prevent crashes
-            application = (
-                Application.builder()
-                .token(TELEGRAM_BOT_TOKEN)
-                .read_timeout(30)      # HTTP read timeout
-                .write_timeout(30)     # HTTP write timeout
-                .connect_timeout(30)   # Connection timeout
-                .pool_timeout(30)      # Connection pool timeout
-                .build()
-            )
-            
-            # Add error handler
-            application.add_error_handler(error_handler)
-            
-            application.add_handler(CommandHandler("start", start_command))
-            application.add_handler(CommandHandler("status", status_command))
-            application.add_handler(CommandHandler("location", location_command))
-            application.add_handler(CommandHandler("locationdetail", location_detail_command))
-            application.add_handler(CommandHandler("nightmode", nightmode_command))
-            application.add_handler(CommandHandler("selfie", selfie_command))
-            application.add_handler(CommandHandler("avatar", avatar_command))
-            application.add_handler(CommandHandler("setfrequency", setfrequency_command))
-            application.add_handler(CommandHandler("release", release_command))
-            application.add_handler(CallbackQueryHandler(button_callback))
-            application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
-            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-            
-            logger.info("Dom Bot v4.7 - DB Close Before Schedule Fix")
-            
-            # FIXED: Add run_polling timeouts
-            application.run_polling(
-                poll_interval=1.0,           # Check every 1 second
-                timeout=30,                  # Long polling timeout
-                drop_pending_updates=True,   # Skip old messages on restart
-                read_timeout=30,             # HTTP read timeout
-                write_timeout=30,            # HTTP write timeout
-                connect_timeout=30,          # Connection timeout
-                pool_timeout=30,             # Pool timeout
-            )
-            
-        except Exception as e:
-            logger.critical(f"Fatal error, restarting in 10 seconds: {e}", exc_info=True)
-            # Stop scheduler before restart
-            try:
-                scheduler.shutdown()
-            except:
-                pass
-            time.sleep(10)
-            logger.info("Restarting bot...")
-            continue  # Restart loop
+    """Main function - SINGLE INSTANCE ONLY"""
+    # FIXED: Removed while True loop - prevents multiple instances
+    scheduler.start()
+    schedule_next_message()
+    
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
+    
+    application.add_error_handler(error_handler)
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("location", location_command))
+    application.add_handler(CommandHandler("locationdetail", location_detail_command))
+    application.add_handler(CommandHandler("nightmode", nightmode_command))
+    application.add_handler(CommandHandler("selfie", selfie_command))
+    application.add_handler(CommandHandler("avatar", avatar_command))
+    application.add_handler(CommandHandler("setfrequency", setfrequency_command))
+    application.add_handler(CommandHandler("release", release_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    logger.info("Dom Bot v4.8 - Thread-Safe + Single Instance")
+    
+    application.run_polling(
+        poll_interval=1.0,
+        timeout=30,
+        drop_pending_updates=True,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30,
+    )
 
 
 if __name__ == "__main__":
