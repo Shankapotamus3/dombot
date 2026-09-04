@@ -5,14 +5,14 @@ import json
 import re
 import io
 import base64
-import time  # ADDED: For startup delay
+import time
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
 from collections import defaultdict
 
 import requests
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -52,24 +52,22 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Database
+# Database - REDUCED pool for Railway limits
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# FIXED: Connection pool settings
 engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True, 
-    pool_size=5,
-    max_overflow=10,
+    pool_size=5,           # REDUCED for Railway limits
+    max_overflow=10,       # REDUCED for Railway limits
     pool_recycle=3600,
     pool_timeout=30,
     pool_reset_on_return=True,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
 
 # ============================================================================
 # CLOUDINARY CONFIG
@@ -81,7 +79,6 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET"),
     secure=True
 )
-
 
 # ============================================================================
 # ENUMS
@@ -95,20 +92,17 @@ class TaskStatus(str, Enum):
     EXPIRED = "expired"
     RELEASED = "released"
 
-
 class IntensityLevel(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     EXTREME = "extreme"
 
-
 class MessageType(str, Enum):
     COMMAND = "command"
     CONVERSATION = "conversation"
     TASK = "task"
     ANALYSIS = "analysis"
-
 
 class AvatarMood(str, Enum):
     COMMANDING = "commanding"
@@ -128,7 +122,6 @@ class AvatarMood(str, Enum):
     MOCKING = "mocking"
     CURIOUS = "curious"
 
-
 class LocationType(str, Enum):
     UNKNOWN = "unknown"
     HOME = "home"
@@ -136,7 +129,6 @@ class LocationType(str, Enum):
     PUBLIC = "public"
     TRANSIT = "transit"
     SOCIAL = "social"
-
 
 # ============================================================================
 # DATABASE MODELS
@@ -324,8 +316,11 @@ VENICE_API_URL = "https://api.venice.ai/api/v1/chat/completions"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 SAFE_WORD = os.getenv("SAFE_WORD", "RED")
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# REMOVED: Global bot instance (was causing separate connection pool)
+# bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+# Global application instance (will be set in main)
+application = None
 
 def get_db():
     db = SessionLocal()
@@ -357,7 +352,6 @@ def get_or_create_user(db: Session, chat_id: str):
 # ============================================================================
 
 def truncate_for_telegram(text: str, max_length: int = 950) -> str:
-    """Truncate text to fit Telegram's caption limit"""
     if len(text) <= max_length:
         return text
     return text[:max_length-3] + "..."
@@ -392,7 +386,7 @@ RACE_OPTIONS = {
 
 
 # ============================================================================
-# BUILD TYPES - ALL 7 OPTIONS
+# BUILD TYPES
 # ============================================================================
 
 BUILD_TYPES = {
@@ -452,13 +446,10 @@ HAIR_COLORS = {
 
 
 # ============================================================================
-# CLAUDE-3 OPUS VERIFICATION THROUGH VENICE
+# CLAUDE-3 OPUS VERIFICATION
 # ============================================================================
 
 async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
-    """Verify photo using Claude-3-Opus through Venice AI"""
-    
-    # Upload to Cloudinary
     cloudinary_url = None
     try:
         upload_result = cloudinary.uploader.upload(
@@ -472,10 +463,8 @@ async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: byt
     except Exception as e:
         logger.error(f"Cloudinary upload failed: {e}")
     
-    # Convert to base64 for Claude vision
     photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
     
-    # Build verification prompt
     prompt = f"""You are verifying BDSM task completion. This photo is a SELFIE taken by the submissive holding their phone in ONE HAND.
 
 TASK REQUIREMENTS:
@@ -544,7 +533,6 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
             result = response.json()
             analysis = result["choices"][0]["message"]["content"]
             
-            # Parse verdict
             is_verified = "VERIFIED" in analysis.upper() and "FAILED" not in analysis.upper()
             confidence = "low"
             if "high" in analysis.lower():
@@ -582,12 +570,9 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
 # ============================================================================
 
 def get_conversational_verification_response(verified: bool, confidence: str, analysis: str, streak: int) -> str:
-    """Generate conversational response for photo verification instead of robotic feedback"""
-    
     import random
     
     if verified:
-        # Success responses - varied and conversational
         success_intros = [
             "Good pet.",
             "That's my good boy.",
@@ -612,13 +597,11 @@ def get_conversational_verification_response(verified: bool, confidence: str, an
         intro = random.choice(success_intros)
         praise = random.choice(success_praises)
         
-        # Only include analysis snippet for low confidence
         if confidence == "low":
             return f"{intro}\n\n{praise}\n\n(Your photo was a bit unclear, but I'll allow it.)"
         return f"{intro}\n\n{praise}"
         
     else:
-        # Failure responses - varied and conversational
         failure_intros = [
             "Disappointing.",
             "That won't do at all.",
@@ -643,7 +626,6 @@ def get_conversational_verification_response(verified: bool, confidence: str, an
         intro = random.choice(failure_intros)
         reaction = random.choice(failure_reactions)
         
-        # Add hint about what was wrong
         hint = ""
         if "clothed" in analysis.lower() or "clothing" in analysis.lower():
             hint = "\n\n(You were supposed to be naked, pet.)"
@@ -656,18 +638,15 @@ def get_conversational_verification_response(verified: bool, confidence: str, an
 
 
 # ============================================================================
-# AI TASK GENERATION - FIXED FOR SELFIES
+# AI TASK GENERATION
 # ============================================================================
 
 async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
-    """Generate AI task based on user's specific situation - FIXED FOR SELFIES"""
-    
     location = user.current_location or "unknown"
     location_detail = user.location_detail or ""
     time_of_day = (datetime.utcnow() - timedelta(hours=7)).hour
     intensity = user.intensity
     
-    # Time period
     if 5 <= time_of_day < 12:
         time_period = "morning"
     elif 12 <= time_of_day < 17:
@@ -677,7 +656,6 @@ async def generate_contextual_ai_task(user: UserState, db: Session) -> dict:
     else:
         time_period = "night"
     
-    # FIXED: Prompt explicitly states photos must be selfies (one hand holding phone)
     prompt = f"""Create a specific BDSM task (MAX 350 CHARACTERS).
 
 CRITICAL: The photo must be a SELFIE taken by the submissive holding their phone in ONE HAND.
@@ -717,7 +695,6 @@ TASK:"""
         ai_description = generate_ai_response(user, prompt, db)
         ai_description = ai_description.strip()
         
-        # Enforce length
         if len(ai_description) > 350:
             ai_description = ai_description[:347] + "..."
         
@@ -739,7 +716,6 @@ TASK:"""
         
     except Exception as e:
         logger.error(f"AI task generation failed: {e}")
-        # FIXED: Template tasks are selfie-friendly
         return {
             "description": f"Strip naked at your {location}. Kneel facing mirror. Selfie showing reflection. {user.parameters.task_timeout_minutes} minutes.",
             "task_type": location,
@@ -752,7 +728,6 @@ TASK:"""
 
 
 async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
-    """Choose between AI or template task - FIXED FOR SELFIES"""
     params = user.parameters
     
     has_details = user.location_detail and len(user.location_detail) > 3
@@ -762,7 +737,6 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
         return await generate_contextual_ai_task(user, db)
     else:
         location = user.current_location or "home"
-        # FIXED: All templates are selfie-friendly
         templates = {
             "home": "Strip naked. Kneel facing mirror. Selfie showing your front. {timeout} min.",
             "work": "Office bathroom: strip, mirror selfie. {timeout} min.",
@@ -781,12 +755,10 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
 
 
 # ============================================================================
-# EXPIRE OLD TASKS - FIXED
+# EXPIRE OLD TASKS
 # ============================================================================
 
 async def expire_old_tasks(user: UserState, db: Session):
-    """Mark old pending tasks as expired and clear current_task_id - FIXED"""
-    # Find tasks older than timeout that are still pending
     cutoff = datetime.utcnow() - timedelta(minutes=user.parameters.task_timeout_minutes + 5)
     
     old_tasks = db.query(Task).filter(
@@ -799,7 +771,6 @@ async def expire_old_tasks(user: UserState, db: Session):
         task.status = TaskStatus.EXPIRED.value
         logger.info(f"Expired old task {task.id} from {task.created_at}")
     
-    # If current_task_id points to an expired/completed/failed task, clear it
     if user.current_task_id:
         current_task = db.query(Task).filter(Task.id == user.current_task_id).first()
         if not current_task or current_task.status in [TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.EXPIRED.value, TaskStatus.RELEASED.value]:
@@ -811,7 +782,7 @@ async def expire_old_tasks(user: UserState, db: Session):
 
 
 # ============================================================================
-# ENHANCED AVATAR GENERATOR WITH ALL BUILDS
+# AVATAR GENERATOR
 # ============================================================================
 
 class AvatarGenerator:
@@ -916,13 +887,11 @@ class AvatarGenerator:
 
     @staticmethod
     def build_prompt(user: UserState, mood: AvatarMood) -> str:
-        """Build avatar prompt with all build types and hair color"""
         params = user.parameters
         mood_data = AvatarGenerator.MOOD_PROMPTS.get(
             mood, AvatarGenerator.MOOD_PROMPTS[AvatarMood.COMMANDING]
         )
         
-        # Get race (default to white if not set)
         race = getattr(params, 'avatar_race', 'white')
         
         race_descriptor = {
@@ -933,15 +902,12 @@ class AvatarGenerator:
             "mixed": "mixed race",
         }.get(race, "Caucasian")
         
-        # Get hair color
         hair_color = getattr(params, 'avatar_hair_color', 'black')
         hair_desc = HAIR_COLORS.get(hair_color, "black hair")
         
-        # Get build type from BUILD_TYPES dict
         build_type = getattr(params, 'avatar_build', 'muscular')
         build_info = BUILD_TYPES.get(build_type, BUILD_TYPES['muscular'])
         
-        # Construct physical description
         physical = f"{params.avatar_age_appearance}-year-old {build_info['gender']}, {race_descriptor}, {build_info['prompt_addon']}, {hair_desc}"
         
         prompt = f"{params.avatar_style} photograph of a dominant {physical}, {mood_data['description']}, {mood_data['clothing']}, {mood_data['expression']}, {mood_data['setting']}, highly detailed, professional lighting, 4k quality, full body visible head to toe"
@@ -965,7 +931,6 @@ class AvatarGenerator:
             
             prompt = AvatarGenerator.build_prompt(user, mood)
             
-            # FIXED: Smaller image size (512x512) and added timeout
             response = requests.post(
                 VENICE_IMAGE_URL,
                 headers={
@@ -1024,11 +989,10 @@ class AvatarGenerator:
 
 
 # ============================================================================
-# AI CONVERSATION (NO PREDETERMINED PHRASES)
+# AI CONVERSATION
 # ============================================================================
 
 def build_adaptive_system_prompt(user: UserState, db: Session) -> str:
-    """Build dynamic system prompt for AI conversation"""
     params = user.parameters
     
     base_prompt = f"""You are a Dominant in a BDSM dynamic with your submissive (called "pet").
@@ -1057,11 +1021,9 @@ RULES:
 
 
 def generate_ai_response(user: UserState, user_message: str, db: Session) -> str:
-    """Generate AI response using Claude through Venice"""
     try:
         system_prompt = build_adaptive_system_prompt(user, db)
         
-        # Get conversation history
         history = (
             db.query(ConversationMessage)
             .filter(ConversationMessage.user_id == user.id)
@@ -1078,9 +1040,7 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
         
         messages.append({"role": "user", "content": user_message})
         
-        # Add delay for realism
         if user.parameters.response_delay_enabled:
-            import time
             time.sleep(random.randint(1, 3))
         
         response = requests.post(
@@ -1108,9 +1068,6 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
 
 
 def generate_conversation_response(user: UserState, db: Session) -> str:
-    """Generate spontaneous conversation opener - NO PREDETERMINED PHRASES"""
-    
-    # Dynamic prompts based on user state
     if user.consecutive_failures > 0:
         prompt = "My pet has been disappointing me. Address them about their failures and demand better."
     elif user.current_streak >= 5:
@@ -1159,15 +1116,13 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
 
 
 # ============================================================================
-# SCHEDULING - FIXED WITH PROPER DB CLOSING
+# SCHEDULING
 # ============================================================================
 
 async def check_escalation(db: Session, user: UserState):
-    """Check if task has expired - FIXED with null check"""
     if not user.awaiting_response:
         return
     
-    # FIXED: Check if last_message_time is None
     if user.last_message_time is None:
         return
     
@@ -1178,11 +1133,12 @@ async def check_escalation(db: Session, user: UserState):
         user.consecutive_failures += 1
         user.current_streak = 0
         db.commit()
-        await bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
+        # FIXED: Use application.bot instead of global bot
+        if application and application.bot:
+            await application.bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
 
 
 async def check_escalation_wrapper(chat_id: str):
-    """Wrapper with proper DB handling - FIXED"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, chat_id)
@@ -1192,7 +1148,7 @@ async def check_escalation_wrapper(chat_id: str):
 
 
 # ============================================================================
-# MESSAGE HANDLERS - FIXED WITH EXPIRE OLD TASKS
+# MESSAGE HANDLERS
 # ============================================================================
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
@@ -1201,10 +1157,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         user = get_or_create_user(db, str(update.effective_chat.id))
         params = user.parameters
         
-        # FIXED: Expire old tasks and clear stale current_task_id
         await expire_old_tasks(user, db)
         
-        # Night mode check
         if params.night_mode_enabled:
             current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
             if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
@@ -1215,7 +1169,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         
         user_text = update.message.text if update.message.text else "[image]"
         
-        # Check understanding mode
         if user.current_task_id and check_understanding_mode(user_text):
             task = db.query(Task).filter(Task.id == user.current_task_id).first()
             if task and task.status == TaskStatus.PENDING.value:
@@ -1227,13 +1180,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 await update.message.reply_text(f"😈 MERCY:\n\n{alt['description']}")
                 return
         
-        # Log message
         user_msg = ConversationMessage(user_id=user.id, message=user_text, is_from_dom=False)
         db.add(user_msg)
         user.interaction_count += 1
         db.commit()
         
-        # Check stale location
         if user.last_location_update:
             hours_since = (datetime.utcnow() - user.last_location_update).total_seconds() / 3600
             if hours_since > params.stale_location_hours and not is_command:
@@ -1247,7 +1198,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 )
                 return
         
-        # Conversation or task?
         is_conversation = random.random() < params.conversation_ratio
         
         if is_conversation and not is_command:
@@ -1269,10 +1219,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 await update.message.reply_text(ai_response)
             return
         
-        # Generate AI task
         task_data = await get_smart_task_for_user(user, db)
         
-        # Create task
         deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
         task = Task(
             user_id=user.id,
@@ -1298,7 +1246,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
             [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task.id}")],
         ]
         
-        # Build caption with truncation
         ai_badge = "🤖 " if task_data.get("ai_generated") else ""
         description = truncate_for_telegram(task_data['description'], 600)
         full_message = truncate_for_telegram(
@@ -1335,7 +1282,6 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
         
-        # FIXED: Expire old tasks first
         await expire_old_tasks(user, db)
         
         photo_type = context.user_data.get("awaiting_photo_type", "task_completion")
@@ -1360,7 +1306,6 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         analyzing_msg = await update.message.reply_text("🔍 Examining your submission...")
         
-        # Use Claude-3-Opus for verification
         verification = await verify_photo_with_claude(user, task, photo_bytes, db)
         
         task.ai_analysis = verification["analysis"]
@@ -1376,12 +1321,11 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.consecutive_failures = 0
             user.awaiting_response = False
             user.reward_points += 5
-            user.current_task_id = None  # FIXED: Clear current task
+            user.current_task_id = None
             
             context.user_data.pop("awaiting_photo_type", None)
             context.user_data.pop("awaiting_photo_task_id", None)
             
-            # CONVERSATIONAL response instead of robotic
             response_text = get_conversational_verification_response(
                 True, 
                 verification['confidence'], 
@@ -1407,12 +1351,11 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.current_streak = 0
             user.awaiting_response = False
             user.reward_points = max(0, user.reward_points - 10)
-            user.current_task_id = None  # FIXED: Clear current task
+            user.current_task_id = None
             
             context.user_data.pop("awaiting_photo_type", None)
             context.user_data.pop("awaiting_photo_task_id", None)
             
-            # CONVERSATIONAL response instead of robotic
             response_text = get_conversational_verification_response(
                 False,
                 verification['confidence'],
@@ -1446,7 +1389,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
         
-        # FIXED: Expire old tasks
         await expire_old_tasks(user, db)
         
         data = query.data
@@ -1465,12 +1407,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"📍 {new_loc.value}\n\nUse /locationdetail")
             return
         
-        # Race selection first
         elif data.startswith("avatar_race_"):
             race = data.replace("avatar_race_", "")
             context.user_data['selected_race'] = race
             
-            # Show all 7 build options
             keyboard = [
                 [InlineKeyboardButton("Twink", callback_data="avatar_build_twink"),
                  InlineKeyboardButton("Otter", callback_data="avatar_build_otter")],
@@ -1483,7 +1423,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Race: {race.title()}\n\nChoose build:", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
-        # Build selection with race
         elif data.startswith("avatar_build_"):
             build = data.replace("avatar_build_", "")
             race = context.user_data.get('selected_race', 'white')
@@ -1491,7 +1430,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.parameters.avatar_race = race
             db.commit()
             
-            # Now show hair color options
             keyboard = [
                 [InlineKeyboardButton("Black", callback_data="hair_black"),
                  InlineKeyboardButton("Blonde", callback_data="hair_blonde")],
@@ -1506,7 +1444,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Set: {race.title()} {build}\n\nHair color:", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         
-        # Hair color selection
         elif data.startswith("hair_"):
             color = data.replace("hair_", "")
             user.parameters.avatar_hair_color = color
@@ -1555,7 +1492,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.consecutive_failures += 1
                 user.current_streak = 0
                 user.awaiting_response = False
-                user.current_task_id = None  # FIXED: Clear current task
+                user.current_task_id = None
                 db.commit()
                 await query.edit_message_caption(caption="❌ FAILED")
             return
@@ -1584,7 +1521,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         race = getattr(user.parameters, 'avatar_race', 'white')
         hair = getattr(user.parameters, 'avatar_hair_color', 'black')
         
-        # FIXED: Show current task info
         current_task_info = ""
         if user.current_task_id:
             task = db.query(Task).filter(Task.id == user.current_task_id).first()
@@ -1694,7 +1630,6 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Three-step avatar: race → build → hair color"""
     keyboard = [
         [InlineKeyboardButton("White", callback_data="avatar_race_white")],
         [InlineKeyboardButton("Black", callback_data="avatar_race_black")],
@@ -1706,7 +1641,6 @@ async def avatar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set how often the bot messages you"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, str(update.effective_chat.id))
@@ -1727,7 +1661,6 @@ async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYP
         max_min = int(context.args[1])
         
         if min_min == 0 and max_min == 0:
-            # Disable scheduled messages
             params.min_interval_minutes = 99999
             params.max_interval_minutes = 99999
             db.commit()
@@ -1746,7 +1679,6 @@ async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYP
         params.max_interval_minutes = max_min
         db.commit()
         
-        # Reschedule with new frequency
         schedule_next_message()
         
         hours_min = min_min / 60
@@ -1777,7 +1709,7 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             task.status = TaskStatus.RELEASED.value
             user.failed_tasks += 1
             user.reward_points = max(0, user.reward_points - 20)
-            user.current_task_id = None  # FIXED: Clear current task
+            user.current_task_id = None
             user.awaiting_response = False
             db.commit()
             await update.message.reply_text("⚠️ Released. -20 points.")
@@ -1790,7 +1722,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED: THREAD-SAFE WITH PROPER EVENT LOOP HANDLING
+# SCHEDULING - FIXED: Use application.bot instead of global bot
 # ============================================================================
 
 def schedule_next_message():
@@ -1800,7 +1732,6 @@ def schedule_next_message():
     except:
         pass
     
-    # Get params FIRST, close DB, THEN schedule
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1810,7 +1741,6 @@ def schedule_next_message():
             logger.info("Scheduled messages disabled")
             return
         
-        # Calculate timing while we have DB open
         if params.night_mode_enabled:
             current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
             is_night = current_hour >= params.night_mode_start or current_hour < params.night_mode_end
@@ -1821,16 +1751,15 @@ def schedule_next_message():
         night_mode_end = params.night_mode_end
         
     finally:
-        db.close()  # CLOSE BEFORE SCHEDULING
+        db.close()
     
-    # Now schedule with CLOSED connection
     if is_night:
         next_time = datetime.utcnow().replace(hour=(night_mode_end + 7) % 24, minute=0)
         if current_hour >= night_mode_end:
             next_time += timedelta(days=1)
         
         scheduler.add_job(
-            send_scheduled_message_safe,  # FIXED: Use wrapper function
+            send_scheduled_message_safe,
             trigger="date",
             run_date=next_time,
             id="dom_message",
@@ -1838,7 +1767,7 @@ def schedule_next_message():
         logger.info(f"Scheduled for after night mode: {next_time}")
     else:
         scheduler.add_job(
-            send_scheduled_message_safe,  # FIXED: Use wrapper function
+            send_scheduled_message_safe,
             trigger=IntervalTrigger(minutes=minutes),
             id="dom_message",
         )
@@ -1846,9 +1775,8 @@ def schedule_next_message():
 
 
 def send_scheduled_message_safe():
-    """Thread-safe wrapper for scheduled message - FIXED"""
+    """Thread-safe wrapper for scheduled message"""
     try:
-        # Create new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(send_scheduled_message())
@@ -1858,7 +1786,7 @@ def send_scheduled_message_safe():
 
 
 async def send_scheduled_message():
-    """Send scheduled message - FIXED: Close DB before slow operations"""
+    """Send scheduled message - FIXED: Close DB before slow operations, use application.bot"""
     
     # PHASE 1: Get all data from DB quickly, then CLOSE connection
     db = SessionLocal()
@@ -1909,6 +1837,11 @@ async def send_scheduled_message():
         db.close()  # CLOSE DB HERE - before slow Telegram operations
     
     # PHASE 2: Now do slow operations with CLOSED DB connection
+    # FIXED: Use application.bot instead of global bot
+    if not application or not application.bot:
+        logger.error("Application not initialized")
+        return
+    
     keyboard = [
         [InlineKeyboardButton("✓ Complete", callback_data=f"complete_{task_id}")],
         [InlineKeyboardButton("✗ Fail", callback_data=f"fail_{task_id}")],
@@ -1925,7 +1858,7 @@ async def send_scheduled_message():
     for attempt in range(3):
         try:
             if image_data:
-                await bot.send_photo(
+                await application.bot.send_photo(
                     chat_id=USER_CHAT_ID,
                     photo=InputFile(io.BytesIO(image_data), filename="task.jpg"),
                     caption=full_message,
@@ -1934,7 +1867,7 @@ async def send_scheduled_message():
                     write_timeout=60,
                 )
             else:
-                await bot.send_message(
+                await application.bot.send_message(
                     chat_id=USER_CHAT_ID,
                     text=full_message,
                     reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1949,53 +1882,51 @@ async def send_scheduled_message():
     if not sent:
         logger.error("Failed to send scheduled message after 3 attempts")
         try:
-            await bot.send_message(
+            await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
                 text="📋 Task waiting. Check your messages.",
             )
         except:
             pass
     
-    # PHASE 3: Schedule next message (opens new DB connection briefly)
+    # PHASE 3: Schedule next message
     schedule_next_message()
 
 
 # ============================================================================
-# ERROR HANDLER - FIXED
+# ERROR HANDLER
 # ============================================================================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log errors and prevent crashes - FIXED"""
     logger.error(f"Exception while handling update: {context.error}")
     
-    # Don't crash on timeouts
     if "TimedOut" in str(context.error) or "timeout" in str(context.error).lower():
         logger.warning("Telegram timeout - continuing...")
         return
     
-    # Log other errors but don't crash
     logger.error(f"Error details: {context.error}", exc_info=True)
 
 
 # ============================================================================
-# MAIN - FIXED: STARTUP DELAY + GRACEFUL SCHEDULER HANDLING
+# MAIN - FIXED: Startup delay, connection pool settings, no global bot
 # ============================================================================
 
 def main():
     """Main function - SINGLE INSTANCE ONLY"""
-    # FIXED: Startup delay to let old instance die (prevents Telegram conflict)
-    logger.info("Starting Dom Bot v4.9 - waiting for any old instances to die...")
+    global application
+    
+    # FIXED: Startup delay to let old instance die
+    logger.info("Starting Dom Bot v5.0 - waiting for any old instances to die...")
     time.sleep(5)
     
-    # FIXED: Graceful scheduler handling (prevents SchedulerAlreadyRunningError)
+    # FIXED: Graceful scheduler handling
     try:
         scheduler.start()
         logger.info("Scheduler started successfully")
     except Exception as e:
-        logger.warning(f"Scheduler already running (probably restarting): {e}")
+        logger.warning(f"Scheduler already running: {e}")
         try:
             scheduler.shutdown(wait=False)
-            logger.info("Shutdown old scheduler")
         except:
             pass
         time.sleep(2)
@@ -2008,6 +1939,7 @@ def main():
     
     schedule_next_message()
     
+    # FIXED: Added connection_pool_size to prevent HTTP pool exhaustion
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
@@ -2015,6 +1947,7 @@ def main():
         .write_timeout(30)
         .connect_timeout(30)
         .pool_timeout(30)
+        .connection_pool_size(20)  # ADDED: Larger HTTP connection pool
         .build()
     )
     
@@ -2033,7 +1966,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v4.9 - Thread-Safe + Single Instance + Graceful Startup")
+    logger.info("Dom Bot v5.0 - Fixed HTTP pool + DB pool + Single Instance")
     
     application.run_polling(
         poll_interval=1.0,
