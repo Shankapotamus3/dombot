@@ -5,6 +5,7 @@ import json
 import re
 import io
 import base64
+import time  # ADDED: For startup delay
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
@@ -391,7 +392,7 @@ RACE_OPTIONS = {
 
 
 # ============================================================================
-# BUILD TYPES - ALL 6 OPTIONS
+# BUILD TYPES - ALL 7 OPTIONS
 # ============================================================================
 
 BUILD_TYPES = {
@@ -1469,7 +1470,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             race = data.replace("avatar_race_", "")
             context.user_data['selected_race'] = race
             
-            # Show all 6 build options
+            # Show all 7 build options
             keyboard = [
                 [InlineKeyboardButton("Twink", callback_data="avatar_build_twink"),
                  InlineKeyboardButton("Otter", callback_data="avatar_build_otter")],
@@ -1968,13 +1969,34 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ============================================================================
-# MAIN - FIXED: NO WHILE LOOP, NO MULTIPLE INSTANCES
+# MAIN - FIXED: STARTUP DELAY + GRACEFUL SCHEDULER HANDLING
 # ============================================================================
 
 def main():
     """Main function - SINGLE INSTANCE ONLY"""
-    # FIXED: Removed while True loop - prevents multiple instances
-    scheduler.start()
+    # FIXED: Startup delay to let old instance die (prevents Telegram conflict)
+    logger.info("Starting Dom Bot v4.9 - waiting for any old instances to die...")
+    time.sleep(5)
+    
+    # FIXED: Graceful scheduler handling (prevents SchedulerAlreadyRunningError)
+    try:
+        scheduler.start()
+        logger.info("Scheduler started successfully")
+    except Exception as e:
+        logger.warning(f"Scheduler already running (probably restarting): {e}")
+        try:
+            scheduler.shutdown(wait=False)
+            logger.info("Shutdown old scheduler")
+        except:
+            pass
+        time.sleep(2)
+        try:
+            scheduler.start()
+            logger.info("Scheduler restarted successfully")
+        except Exception as e2:
+            logger.error(f"Failed to restart scheduler: {e2}")
+            raise
+    
     schedule_next_message()
     
     application = (
@@ -2002,7 +2024,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v4.8 - Thread-Safe + Single Instance")
+    logger.info("Dom Bot v4.9 - Thread-Safe + Single Instance + Graceful Startup")
     
     application.run_polling(
         poll_interval=1.0,
