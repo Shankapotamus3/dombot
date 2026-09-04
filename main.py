@@ -57,7 +57,16 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=10, max_overflow=20)
+# FIXED: Dramatically increased pool size and added recycling
+engine = create_engine(
+    DATABASE_URL, 
+    pool_pre_ping=True, 
+    pool_size=20,           # Increased from 10
+    max_overflow=50,        # Increased from 20
+    pool_recycle=3600,      # Recycle connections after 1 hour
+    pool_timeout=60,        # Wait up to 60 seconds for connection
+    pool_reset_on_return=True,  # Reset connections when returned to pool
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -1984,7 +1993,7 @@ def main():
             application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
             
-            logger.info("Dom Bot v4.5 - Timeout Protection + Auto-Restart")
+            logger.info("Dom Bot v4.6 - Pool Size Fix + Auto-Restart")
             
             # FIXED: Add run_polling timeouts
             application.run_polling(
