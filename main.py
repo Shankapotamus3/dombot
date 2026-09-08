@@ -1773,12 +1773,6 @@ async def send_scheduled_message():
         except:
             pass
     
-    # FIXED: Close session to free up HTTP connection
-    try:
-        await application.bot.session.close()
-    except:
-        pass
-    
     schedule_next_message()
 
 
