@@ -1837,14 +1837,6 @@ def main():
         .build()
     )
     
-    # Initialize bot to warm up connection pool
-    async def init_bot():
-        await application.bot.get_me()
-        logger.info("Bot initialized and HTTP pool warmed up")
-    
-    # Run initialization
-    asyncio.run(init_bot())
-    
     application.add_error_handler(error_handler)
     
     application.add_handler(CommandHandler("start", start_command))
