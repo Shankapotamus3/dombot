@@ -503,7 +503,7 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
 
 
 # ============================================================================
-# CONVERSATIONAL RESPONSES
+# CONVERSATIONAL VERIFICATION RESPONSES
 # ============================================================================
 
 def get_conversational_verification_response(verified: bool, confidence: str, analysis: str, streak: int) -> str:
@@ -753,14 +753,14 @@ async def expire_old_tasks(user: UserState, db: Session):
     old_tasks = db.query(Task).filter(Task.user_id == user.id, Task.status == TaskStatus.PENDING.value, Task.created_at < cutoff).all()
     for task in old_tasks:
         task.status = TaskStatus.EXPIRED.value
-        logger.info(f"Expired old task {task.id} from {task.created_at}")
+        logger.info(f"Expired old task {task.id}")
     
     if user.current_task_id:
         current_task = db.query(Task).filter(Task.id == user.current_task_id).first()
         if not current_task or current_task.status in [TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.EXPIRED.value, TaskStatus.RELEASED.value]:
             user.current_task_id = None
             user.awaiting_response = False
-            logger.info(f"Cleared stale current_task_id for user {user.id}")
+            logger.info(f"Cleared stale task for user {user.id}")
     
     db.commit()
 
@@ -1019,7 +1019,7 @@ async def check_escalation_wrapper(chat_id: str):
 
 
 # ============================================================================
-# MESSAGE HANDLERS
+# MESSAGE HANDLERS - WITH ACTIVE TASK CHECK
 # ============================================================================
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
@@ -1030,6 +1030,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         
         await expire_old_tasks(user, db)
         
+        # Night mode check
         if params.night_mode_enabled:
             current_hour = (datetime.utcnow() - timedelta(hours=7)).hour
             if current_hour >= params.night_mode_start or current_hour < params.night_mode_end:
@@ -1072,6 +1073,18 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 )
                 return
         
+        # NEW: Check if user has active task before generating new one
+        if user.current_task_id:
+            task = db.query(Task).filter(Task.id == user.current_task_id).first()
+            if task and task.status == TaskStatus.PENDING.value:
+                time_left = task.deadline - datetime.utcnow()
+                minutes_left = max(0, int(time_left.total_seconds() / 60))
+                await update.message.reply_text(
+                    f"⏳ Finish your current task first! ({minutes_left}m left)\n"
+                    f"Complete it or use /release to give up (-20 points)!"
+                )
+                return
+        
         # Higher chance of conversation
         is_question = "?" in user_text or any(word in user_text.lower() for word in ["what", "how", "why", "when", "where", "who", "can you", "will you"])
         is_conversation = random.random() < params.conversation_ratio or is_question
@@ -1095,7 +1108,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 await update.message.reply_text(ai_response)
             return
         
-        # Generate creative AI task
+        # Generate AI task
         task_data = await get_smart_task_for_user(user, db)
         
         deadline = datetime.utcnow() + timedelta(minutes=params.task_timeout_minutes)
@@ -1357,7 +1370,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me (race → build → hair)\n/setfrequency - How often I message you\n/setcreativity - How daring/creative (0-1)\n/setrisk - Risk tolerance (0-1)"
+        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me (race → build → hair)\n/setfrequency - How often I message you\n/setcreativity - How daring/creative (0-1)\n/setrisk - Risk tolerance (0-1)\n/release - Give up current task"
     )
 
 
@@ -1624,7 +1637,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED HTTP POOL
+# SCHEDULING - WITH ACTIVE TASK CHECK
 # ============================================================================
 
 def schedule_next_message():
@@ -1681,6 +1694,17 @@ async def send_scheduled_message():
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
+        
+        # NEW: Don't send if user has active pending task
+        if user.current_task_id:
+            task = db.query(Task).filter(Task.id == user.current_task_id).first()
+            if task and task.status == TaskStatus.PENDING.value:
+                time_left = task.deadline - datetime.utcnow()
+                minutes_left = int(time_left.total_seconds() / 60)
+                logger.info(f"User has active task ({minutes_left}m left), skipping new scheduled message")
+                # Still schedule next check
+                schedule_next_message()
+                return
         
         if params.min_interval_minutes >= 99999:
             return
@@ -1773,6 +1797,9 @@ async def send_scheduled_message():
         except:
             pass
     
+    # Add delay to prevent pool exhaustion
+    await asyncio.sleep(2)
+    
     schedule_next_message()
 
 
@@ -1791,13 +1818,13 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ============================================================================
-# MAIN - FIXED HTTP POOL
+# MAIN
 # ============================================================================
 
 def main():
     global application
     
-    logger.info("Starting Dom Bot v5.1 - Fixed HTTP Pool...")
+    logger.info("Starting Dom Bot v5.2 - No Stacking...")
     time.sleep(5)
     
     try:
@@ -1819,15 +1846,13 @@ def main():
     
     schedule_next_message()
     
-    # FIXED: Larger HTTP connection pool + higher timeout
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
-        .pool_timeout(60)  # INCREASED
-        .connection_pool_size(50)  # INCREASED
+        .read_timeout(60)
+        .write_timeout(60)
+        .connect_timeout(60)
+        .pool_timeout(120)
         .build()
     )
     
@@ -1848,16 +1873,16 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v5.1 - Fixed HTTP Pool + Creative Tasks")
+    logger.info("Dom Bot v5.2 - No Stacking + Active Task Check")
     
     application.run_polling(
         poll_interval=1.0,
         timeout=30,
         drop_pending_updates=True,
-        read_timeout=30,
-        write_timeout=30,
-        connect_timeout=30,
-        pool_timeout=60,  # INCREASED
+        read_timeout=60,
+        write_timeout=60,
+        connect_timeout=60,
+        pool_timeout=120,
     )
 
 
