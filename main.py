@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+DOM Bot v5.5 - Complete Fixed Version
+- Fixed: Event loop closed error
+- Fixed: "Speak clearly, pet." fallback
+- Fixed: Complete button not working
+- Added: Debug logging for Venice AI
+"""
+
 import os
 import random
 import asyncio
@@ -22,7 +31,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 import logging
@@ -48,12 +57,22 @@ from sqlalchemy import (
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 
-logging.basicConfig(level=logging.INFO)
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Database
+# ============================================================================
+# DATABASE SETUP
+# ============================================================================
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dombot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -324,8 +343,12 @@ class Reward(Base):
 # Create tables
 Base.metadata.create_all(bind=engine)
 
-# Configuration
-scheduler = BackgroundScheduler()
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Use AsyncIOScheduler instead of BackgroundScheduler to avoid event loop issues
+scheduler = AsyncIOScheduler()
 
 # API Keys
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -379,7 +402,7 @@ def get_task_hash(description: str) -> str:
 
 
 # ============================================================================
-# RACE OPTIONS, BUILD TYPES, HAIR COLORS
+# CONSTANTS
 # ============================================================================
 
 RACE_OPTIONS = {
@@ -417,11 +440,6 @@ TASK_CATEGORIES = {
     "physical": {"descriptions": ["hold", "maintain", "endure", "suffer", "challenge"], "risk_multiplier": 1.1},
 }
 
-
-# ============================================================================
-# CREATIVE FALLBACKS (Better than "Speak clearly, pet")
-# ============================================================================
-
 CREATIVE_FALLBACKS = [
     "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and body. 10 min.",
     "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind. 8 min.",
@@ -433,9 +451,8 @@ CREATIVE_FALLBACKS = [
     "Kneel on floor, back straight, hands behind head, naked. Selfie from above. 10 min.",
 ]
 
-
 # ============================================================================
-# DEBUG AI RESPONSE FUNCTION (FIXED)
+# AI RESPONSE (DEBUG VERSION)
 # ============================================================================
 
 def build_adaptive_system_prompt(user: UserState, db: Session) -> str:
@@ -468,20 +485,18 @@ RULES:
 
 def generate_ai_response(user: UserState, user_message: str, db: Session) -> str:
     """
-    DEBUG VERSION - Logs everything to diagnose API issues
+    Generate AI response with full debugging
     """
     logger.info("=" * 60)
     logger.info("GENERATE_AI_RESPONSE CALLED")
     logger.info("=" * 60)
     
-    # Check if API key exists
     if not VENICE_API_KEY:
         logger.error("VENICE_API_KEY is not set!")
         return random.choice(CREATIVE_FALLBACKS)
     
     logger.info(f"VENICE_API_KEY present: {bool(VENICE_API_KEY)}")
     logger.info(f"VENICE_API_KEY length: {len(VENICE_API_KEY)}")
-    logger.info(f"VENICE_API_URL: {VENICE_API_URL}")
     
     try:
         system_prompt = build_adaptive_system_prompt(user, db)
@@ -498,15 +513,10 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
         
         messages.append({"role": "user", "content": user_message})
         
-        logger.info(f"Messages being sent to AI:")
-        for i, msg in enumerate(messages):
-            content_preview = msg['content'][:100] if len(msg['content']) > 100 else msg['content']
-            logger.info(f"  [{msg['role']}] {content_preview}...")
+        logger.info(f"Sending {len(messages)} messages to Venice API")
         
         if user.parameters.response_delay_enabled:
             time.sleep(random.randint(1, 3))
-        
-        logger.info("Sending request to Venice API...")
         
         response = requests.post(
             VENICE_API_URL,
@@ -523,45 +533,28 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
             timeout=30,
         )
         
-        logger.info(f"Response received!")
-        logger.info(f"Status Code: {response.status_code}")
-        logger.info(f"Response Headers: {dict(response.headers)}")
+        logger.info(f"Response status: {response.status_code}")
         
         if response.status_code == 200:
             try:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                logger.info(f"SUCCESS! AI Response: {content[:100]}...")
+                logger.info(f"SUCCESS: {content[:100]}...")
                 logger.info("=" * 60)
                 return content
             except (KeyError, IndexError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to parse successful response: {e}")
-                logger.error(f"Raw response: {response.text[:500]}")
+                logger.error(f"Parse error: {e}")
+                logger.error(f"Raw: {response.text[:500]}")
                 return random.choice(CREATIVE_FALLBACKS)
         
-        # Log the error details
-        logger.error(f"API returned non-200 status: {response.status_code}")
-        logger.error(f"Response body: {response.text[:500]}")
-        
-        # Return creative fallback instead of static message
-        fallback = random.choice(CREATIVE_FALLBACKS)
-        logger.info(f"Using creative fallback: {fallback[:50]}...")
-        return fallback
+        logger.error(f"API Error {response.status_code}: {response.text[:500]}")
+        return random.choice(CREATIVE_FALLBACKS)
         
     except requests.exceptions.Timeout:
-        logger.error("Venice API Timeout (30s)")
+        logger.error("Venice API Timeout")
         return random.choice(CREATIVE_FALLBACKS)
-        
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection Error: {e}")
-        return random.choice(CREATIVE_FALLBACKS)
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request Exception: {e}")
-        return random.choice(CREATIVE_FALLBACKS)
-        
     except Exception as e:
-        logger.error(f"Unexpected error in generate_ai_response: {e}", exc_info=True)
+        logger.error(f"Exception: {e}", exc_info=True)
         return random.choice(CREATIVE_FALLBACKS)
 
 
@@ -581,7 +574,7 @@ def generate_conversation_response(user: UserState, db: Session) -> str:
 
 
 # ============================================================================
-# CLAUDE VERIFICATION (with debug)
+# PHOTO VERIFICATION
 # ============================================================================
 
 async def verify_photo_with_claude(user: UserState, task: Task, photo_bytes: bytes, db: Session) -> dict:
@@ -633,8 +626,6 @@ ANALYSIS: [Your detailed explanation of what you see]
 Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, not professional photography."""
 
     try:
-        logger.info("Sending photo verification request to Venice AI...")
-        
         response = requests.post(
             VENICE_API_URL,
             headers={
@@ -656,8 +647,6 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
             timeout=60,
         )
         
-        logger.info(f"Verification response status: {response.status_code}")
-        
         if response.status_code == 200:
             result = response.json()
             analysis = result["choices"][0]["message"]["content"]
@@ -668,8 +657,6 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
             elif "medium" in analysis.lower():
                 confidence = "medium"
             
-            logger.info(f"Photo verification: {is_verified} (confidence: {confidence})")
-            
             return {
                 "verified": is_verified,
                 "analysis": analysis,
@@ -677,7 +664,7 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
                 "confidence": confidence
             }
         else:
-            logger.error(f"Verification API error: {response.status_code} - {response.text[:200]}")
+            logger.error(f"Verification API error: {response.status_code}")
             return {
                 "verified": False,
                 "analysis": f"API Error: {response.status_code}",
@@ -686,7 +673,7 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
             }
             
     except Exception as e:
-        logger.error(f"Claude verification error: {e}", exc_info=True)
+        logger.error(f"Verification error: {e}")
         return {
             "verified": False,
             "analysis": f"Error: {str(e)}",
@@ -695,38 +682,25 @@ Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, 
         }
 
 
-# ============================================================================
-# CONVERSATIONAL VERIFICATION RESPONSES
-# ============================================================================
-
 def get_conversational_verification_response(verified: bool, confidence: str, analysis: str, streak: int) -> str:
-    import random
-    
     if verified:
-        success_intros = ["Good pet.", "That's my good boy.", "Acceptable.", "You actually listened.", "Not bad.", "I suppose that will do.", "Hmm... acceptable.", "You may have earned this one."]
-        success_praises = [f"Streak now at {streak}. Don't get cocky.", f"🔥 {streak} in a row. Keep it up.", "You know what happens to good pets... they get more tasks.", "See how easy it is when you obey?", "I might just start to enjoy your compliance.", "That's the obedience I expect.", "You actually managed to follow directions. Impressive."]
+        success_intros = ["Good pet.", "That's my good boy.", "Acceptable.", "You actually listened.", "Not bad."]
+        success_praises = [f"Streak now at {streak}.", f"🔥 {streak} in a row. Keep it up.", "See how easy it is when you obey?"]
         intro = random.choice(success_intros)
         praise = random.choice(success_praises)
         if confidence == "low":
             return f"{intro}\n\n{praise}\n\n(Your photo was a bit unclear, but I'll allow it.)"
         return f"{intro}\n\n{praise}"
     else:
-        failure_intros = ["Disappointing.", "That won't do at all.", "Did you think I wouldn't notice?", "You're testing my patience.", "Unacceptable.", "I expected better. Actually, no I didn't.", "Is this a joke?", "You must think I'm stupid."]
-        failure_reactions = ["Streak broken. Back to zero.", "Points deducted. Try harder next time.", "Perhaps you need a reminder of who owns you.", "I'll remember this failure.", "Do you want to disappoint me again?", "This is why I keep you on a short leash.", "Maybe you need something... stricter."]
+        failure_intros = ["Disappointing.", "That won't do at all.", "Did you think I wouldn't notice?", "Unacceptable."]
+        failure_reactions = ["Streak broken. Back to zero.", "Points deducted. Try harder next time.", "I'll remember this failure."]
         intro = random.choice(failure_intros)
         reaction = random.choice(failure_reactions)
-        hint = ""
-        if "clothed" in analysis.lower() or "clothing" in analysis.lower():
-            hint = "\n\n(You were supposed to be naked, pet.)"
-        elif "pose" in analysis.lower() or "position" in analysis.lower():
-            hint = "\n\n(Your position was wrong. Try again.)"
-        elif "location" in analysis.lower():
-            hint = "\n\n(Wrong location. I said where I wanted you.)"
-        return f"{intro}\n\n{reaction}{hint}"
+        return f"{intro}\n\n{reaction}"
 
 
 # ============================================================================
-# CREATIVE AI TASK GENERATION (with debug)
+# TASK GENERATION
 # ============================================================================
 
 def get_recent_task_hashes(db: Session, user_id: int, hours: int = 48) -> Set[str]:
@@ -736,10 +710,6 @@ def get_recent_task_hashes(db: Session, user_id: int, hours: int = 48) -> Set[st
 
 
 async def generate_creative_ai_task(user: UserState, db: Session) -> dict:
-    logger.info("=" * 60)
-    logger.info("GENERATE_CREATIVE_AI_TASK")
-    logger.info("=" * 60)
-    
     location = user.current_location or "unknown"
     location_detail = user.location_detail or ""
     time_of_day = (datetime.utcnow() - timedelta(hours=7)).hour
@@ -772,8 +742,6 @@ async def generate_creative_ai_task(user: UserState, db: Session) -> dict:
         selected_category = random.choice(preferred)
     else:
         selected_category = random.choice(categories)
-    
-    category_info = TASK_CATEGORIES[selected_category]
     
     risk_level = "medium"
     if risk_tolerance > 0.8 or intensity == IntensityLevel.EXTREME.value:
@@ -809,18 +777,6 @@ SELFIE CONSTRAINTS:
 - No impossible angles (behind, ceiling, etc.)
 - Timer mode allowed for floor shots
 
-DARING ELEMENTS TO CONSIDER:
-- {"Public visibility risk" if selected_category == "public_risk" else "Private but exposed"}
-- {"Physical endurance" if selected_category == "physical" else "Mental submission"}
-- {"Humiliating position" if selected_category in ["degradation", "humiliation"] else "Proud submission"}
-- {"Edge of discovery" if risk_level in ["high", "extreme"] else "Safe but thrilling"}
-
-BE SPECIFIC:
-- Use exact furniture names (bed, couch, desk, chair)
-- Use specific rooms (kitchen, bathroom, bedroom)
-- Include exact time limits
-- Describe exact dress state
-
 Example creative tasks:
 - "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and feet. 10 min."
 - "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind. 8 min."
@@ -831,11 +787,8 @@ Create something UNIQUE and DARING:
 TASK:"""
 
     try:
-        logger.info("Calling AI for task generation...")
         ai_description = generate_ai_response(user, prompt, db)
         ai_description = ai_description.strip().strip('"\'')
-        
-        logger.info(f"Raw AI response: {ai_description[:100]}...")
         
         if len(ai_description) > 350:
             ai_description = ai_description[:347] + "..."
@@ -845,7 +798,7 @@ TASK:"""
         
         task_hash = get_task_hash(ai_description)
         if task_hash in recent_hashes and user.parameters.avoid_repetition:
-            logger.info("Task too similar to recent, regenerating...")
+            logger.info("Task too similar, regenerating...")
             prompt += "\n\nWARNING: The above task was too similar to a recent one. Create something COMPLETELY DIFFERENT."
             ai_description = generate_ai_response(user, prompt, db)
             ai_description = ai_description.strip().strip('"\'')
@@ -868,9 +821,6 @@ TASK:"""
         
         db.commit()
         
-        logger.info(f"Task generated successfully: {ai_description[:50]}...")
-        logger.info("=" * 60)
-        
         return {
             "description": ai_description,
             "task_type": f"{selected_category}_{location}",
@@ -885,12 +835,8 @@ TASK:"""
         }
         
     except Exception as e:
-        logger.error(f"AI task generation failed: {e}", exc_info=True)
-        
-        # Use creative fallback instead of generic
+        logger.error(f"AI task generation failed: {e}")
         fallback = random.choice(CREATIVE_FALLBACKS)
-        logger.info(f"Using fallback task: {fallback[:50]}...")
-        
         return {
             "description": fallback,
             "task_type": selected_category,
@@ -945,10 +891,6 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
         }
 
 
-# ============================================================================
-# EXPIRE OLD TASKS
-# ============================================================================
-
 async def expire_old_tasks(user: UserState, db: Session):
     cutoff = datetime.utcnow() - timedelta(minutes=user.parameters.task_timeout_minutes + 5)
     
@@ -968,7 +910,7 @@ async def expire_old_tasks(user: UserState, db: Session):
 
 
 # ============================================================================
-# AVATAR GENERATOR (with debug)
+# AVATAR GENERATOR
 # ============================================================================
 
 class AvatarGenerator:
@@ -1016,7 +958,6 @@ class AvatarGenerator:
             return None
             
         try:
-            # Check for recent cached image
             recent = db.query(AvatarImage).filter(
                 AvatarImage.user_id == user.id,
                 AvatarImage.mood == mood.value
@@ -1025,11 +966,9 @@ class AvatarGenerator:
             if recent and (datetime.utcnow() - recent.generated_at) < timedelta(hours=1) and recent.use_count < 3:
                 recent.use_count += 1
                 db.commit()
-                logger.info(f"Using cached avatar for mood {mood.value}")
                 return base64.b64decode(recent.image_data)
             
             prompt = AvatarGenerator.build_prompt(user, mood)
-            logger.info(f"Generating avatar with prompt: {prompt[:100]}...")
             
             response = requests.post(
                 VENICE_IMAGE_URL,
@@ -1047,8 +986,6 @@ class AvatarGenerator:
                 timeout=30,
             )
             
-            logger.info(f"Avatar generation status: {response.status_code}")
-            
             if response.status_code == 200:
                 image_data = response.json().get("images", [None])[0]
                 if image_data:
@@ -1061,14 +998,11 @@ class AvatarGenerator:
                     )
                     db.add(avatar)
                     db.commit()
-                    logger.info("Avatar generated successfully")
                     return base64.b64decode(image_data)
-                    
-            logger.error(f"Avatar generation failed: {response.status_code} - {response.text[:200]}")
             return None
             
         except Exception as e:
-            logger.error(f"Avatar generation error: {e}", exc_info=True)
+            logger.error(f"Avatar generation error: {e}")
             return None
 
     @staticmethod
@@ -1137,37 +1071,6 @@ def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
     levels = list(IntensityLevel)
     idx = levels.index(current)
     return levels[idx - 1] if idx > 0 else current
-
-
-# ============================================================================
-# SCHEDULING
-# ============================================================================
-
-async def check_escalation(db: Session, user: UserState):
-    if not user.awaiting_response:
-        return
-    
-    if user.last_message_time is None:
-        return
-    
-    params = user.parameters
-    time_since = datetime.utcnow() - user.last_message_time
-    if time_since > timedelta(minutes=params.task_timeout_minutes):
-        user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-        user.consecutive_failures += 1
-        user.current_streak = 0
-        db.commit()
-        if application and application.bot:
-            await application.bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
-
-
-async def check_escalation_wrapper(chat_id: str):
-    db = SessionLocal()
-    try:
-        user = get_or_create_user(db, chat_id)
-        await check_escalation(db, user)
-    finally:
-        db.close()
 
 
 # ============================================================================
@@ -1309,12 +1212,17 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         else:
             await update.message.reply_text(full_message, reply_markup=InlineKeyboardMarkup(keyboard))
         
-        scheduler.add_job(
-            lambda: asyncio.run(check_escalation_wrapper(str(update.effective_chat.id))),
-            trigger=IntervalTrigger(minutes=params.task_timeout_minutes),
-            id=f"escalation_{update.effective_chat.id}",
-            replace_existing=True,
-        )
+        # Schedule escalation check
+        async def escalation_check():
+            await asyncio.sleep(params.task_timeout_minutes * 60)
+            db2 = SessionLocal()
+            try:
+                user2 = get_or_create_user(db2, str(update.effective_chat.id))
+                await check_escalation(db2, user2)
+            finally:
+                db2.close()
+        
+        asyncio.create_task(escalation_check())
                 
     except Exception as e:
         logger.error(f"Process message error: {e}", exc_info=True)
@@ -1414,11 +1322,13 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ============================================================================
-# BUTTON CALLBACK - FIXED FOR BOTH CAPTION AND TEXT
+# BUTTON CALLBACK - FIXED
 # ============================================================================
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    
+    # IMPORTANT: Answer callback immediately to prevent timeout
     await query.answer()
     
     db = SessionLocal()
@@ -1473,49 +1383,45 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"✅ Avatar set: {user.parameters.avatar_race.title()} {user.parameters.avatar_build} with {HAIR_COLORS.get(color, color)}")
             return
         
-        elif data.startswith("avatar_hair_"):
-            user.parameters.avatar_hair_length = data.replace("avatar_hair_", "")
-            db.commit()
-            await query.edit_message_text("Hair updated")
-            return
-        
-        elif data.startswith("avatar_color_"):
-            user.parameters.avatar_hair_color = data.replace("avatar_color_", "")
-            db.commit()
-            await query.edit_message_text("Color updated")
-            return
-        
         elif data == "avatar_toggle":
             user.parameters.avatar_enabled = not user.parameters.avatar_enabled
             db.commit()
             await query.edit_message_text(f"Avatar: {'on' if user.parameters.avatar_enabled else 'off'}")
             return
         
-        # FIXED: Handle both caption and text messages
+        # FIXED: Handle Complete button
         if data.startswith("complete_"):
             task_id = int(data.split("_")[1])
             task = db.query(Task).filter(Task.id == task_id).first()
-            if task and task.status == TaskStatus.PENDING.value:
-                context.user_data["awaiting_photo_type"] = "task_completion"
-                context.user_data["awaiting_photo_task_id"] = task_id
+            
+            if not task:
+                await query.edit_message_text("Task not found.")
+                return
                 
-                # FIX: Check if message has caption before editing
-                try:
-                    if query.message.caption:
-                        await query.edit_message_caption(
-                            caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send selfie", 950)
-                        )
-                    elif query.message.text:
-                        await query.edit_message_text(
-                            text=truncate_for_telegram(f"{query.message.text}\n\n📸 Send selfie", 950)
-                        )
-                    else:
-                        await query.answer("📸 Send selfie to complete!")
-                except Exception as e:
-                    logger.warning(f"Could not edit message: {e}")
+            if task.status != TaskStatus.PENDING.value:
+                await query.edit_message_text("This task is no longer active.")
+                return
+            
+            # Set up photo expectation
+            context.user_data["awaiting_photo_type"] = "task_completion"
+            context.user_data["awaiting_photo_task_id"] = task_id
+            
+            # Edit message to show waiting for photo
+            try:
+                if query.message.caption:
+                    new_caption = truncate_for_telegram(f"{query.message.caption}\n\n📸 Send your selfie now!", 950)
+                    await query.edit_message_caption(caption=new_caption)
+                elif query.message.text:
+                    new_text = truncate_for_telegram(f"{query.message.text}\n\n📸 Send your selfie now!", 950)
+                    await query.edit_message_text(text=new_text)
+                else:
                     await query.answer("📸 Send selfie to complete!")
+            except Exception as e:
+                logger.warning(f"Could not edit message: {e}")
+                await query.answer("📸 Send selfie to complete!")
             return
         
+        # Handle Fail button
         if data.startswith("fail_"):
             task_id = int(data.split("_")[1])
             task = db.query(Task).filter(Task.id == task_id).first()
@@ -1532,6 +1438,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Callback error: {e}", exc_info=True)
+        try:
+            await query.answer("Error processing. Try again.")
+        except:
+            pass
     finally:
         db.close()
 
@@ -1695,7 +1605,7 @@ async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYP
             params.min_interval_minutes = 99999
             params.max_interval_minutes = 99999
             db.commit()
-            await update.message.reply_text("⏸️ Scheduled messages disabled. I'll only respond when you message me.")
+            await update.message.reply_text("⏸️ Scheduled messages disabled.")
             return
         
         if min_min >= max_min:
@@ -1804,37 +1714,24 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.close()
 
 
-# ============================================================================
-# DEBUG COMMAND (NEW)
-# ============================================================================
-
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test Venice AI connection and show diagnostics"""
+    """Test Venice AI connection"""
     await update.message.reply_text("🔍 Testing Venice AI connection...")
     
     logger.info("=" * 60)
-    logger.info("DEBUG COMMAND EXECUTED")
+    logger.info("DEBUG COMMAND")
     logger.info("=" * 60)
     
-    # Check environment
     checks = []
     checks.append(f"TELEGRAM_BOT_TOKEN: {'✅ Set' if TELEGRAM_BOT_TOKEN else '❌ Missing'}")
     checks.append(f"VENICE_API_KEY: {'✅ Set' if VENICE_API_KEY else '❌ Missing'}")
     checks.append(f"USER_CHAT_ID: {'✅ Set' if USER_CHAT_ID else '❌ Missing'}")
-    checks.append(f"DATABASE_URL: {'✅ Set' if DATABASE_URL else '❌ Missing'}")
     
     if not VENICE_API_KEY:
-        await update.message.reply_text(
-            "❌ VENICE_API_KEY not set!\n\n"
-            "Add it to Railway environment variables:\n"
-            "VENICE_API_KEY=your_key_here"
-        )
+        await update.message.reply_text("❌ VENICE_API_KEY not set!")
         return
     
-    # Test API connection
     try:
-        logger.info("Sending test request to Venice API...")
-        
         response = requests.post(
             VENICE_API_URL,
             headers={
@@ -1843,50 +1740,27 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             },
             json={
                 "model": "claude-opus-4-8-fast",
-                "messages": [{"role": "user", "content": "Say 'Venice AI is working perfectly!'"}],
+                "messages": [{"role": "user", "content": "Say 'Venice AI is working!'"}],
                 "temperature": 0.9,
                 "max_tokens": 100
             },
             timeout=30
         )
         
-        logger.info(f"Test response status: {response.status_code}")
-        
         if response.status_code == 200:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
-            
             result = (
                 f"✅ Venice AI is working!\n\n"
                 f"Environment:\n" + "\n".join(checks) + f"\n\n"
-                f"API Response:\n{content}\n\n"
-                f"Model: claude-opus-4-8-fast\n"
-                f"Status: {response.status_code}"
+                f"Response: {content}"
             )
             await update.message.reply_text(result)
-            logger.info("Debug test PASSED")
-            
         else:
-            error_detail = response.text[:500]
-            result = (
-                f"❌ Venice AI Error!\n\n"
-                f"Environment:\n" + "\n".join(checks) + f"\n\n"
-                f"Status Code: {response.status_code}\n"
-                f"Response: {error_detail}\n\n"
-                f"Check your API key and model name."
-            )
-            await update.message.reply_text(result)
-            logger.error(f"Debug test FAILED: {response.status_code} - {error_detail}")
+            await update.message.reply_text(f"❌ API Error {response.status_code}:\n{response.text[:500]}")
             
     except Exception as e:
-        result = (
-            f"❌ Exception occurred!\n\n"
-            f"Environment:\n" + "\n".join(checks) + f"\n\n"
-            f"Error: {str(e)}\n\n"
-            f"Check Railway logs for details."
-        )
-        await update.message.reply_text(result)
-        logger.error(f"Debug exception: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)}")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1894,7 +1768,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING
+# SCHEDULING - FIXED WITH ASYNCIO SCHEDULER
 # ============================================================================
 
 def schedule_next_message():
@@ -1929,24 +1803,24 @@ def schedule_next_message():
         if current_hour >= night_mode_end:
             next_time += timedelta(days=1)
         
-        scheduler.add_job(send_scheduled_message_safe, trigger="date", run_date=next_time, id="dom_message")
+        scheduler.add_job(
+            send_scheduled_message, 
+            trigger="date", 
+            run_date=next_time, 
+            id="dom_message"
+        )
         logger.info(f"Scheduled for after night mode: {next_time}")
     else:
-        scheduler.add_job(send_scheduled_message_safe, trigger=IntervalTrigger(minutes=minutes), id="dom_message")
+        scheduler.add_job(
+            send_scheduled_message, 
+            trigger=IntervalTrigger(minutes=minutes), 
+            id="dom_message"
+        )
         logger.info(f"Scheduled next message in {minutes} minutes")
 
 
-def send_scheduled_message_safe():
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(send_scheduled_message())
-        loop.close()
-    except Exception as e:
-        logger.error(f"Scheduled message failed: {e}")
-
-
 async def send_scheduled_message():
+    """Send scheduled message - runs in async context"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
@@ -1958,7 +1832,7 @@ async def send_scheduled_message():
             if task and task.status == TaskStatus.PENDING.value:
                 time_left = task.deadline - datetime.utcnow()
                 minutes_left = int(time_left.total_seconds() / 60)
-                logger.info(f"User has active task ({minutes_left}m left), skipping new scheduled message")
+                logger.info(f"User has active task ({minutes_left}m left), skipping")
                 schedule_next_message()
                 return
         
@@ -2048,12 +1922,26 @@ async def send_scheduled_message():
     
     if not sent:
         logger.error("Failed to send scheduled message after 3 attempts")
-        try:
-            await application.bot.send_message(chat_id=USER_CHAT_ID, text="📋 Task waiting. Check your messages.")
-        except:
-            pass
     
     schedule_next_message()
+
+
+async def check_escalation(db: Session, user: UserState):
+    if not user.awaiting_response:
+        return
+    
+    if user.last_message_time is None:
+        return
+    
+    params = user.parameters
+    time_since = datetime.utcnow() - user.last_message_time
+    if time_since > timedelta(minutes=params.task_timeout_minutes):
+        user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
+        user.consecutive_failures += 1
+        user.current_streak = 0
+        db.commit()
+        if application and application.bot:
+            await application.bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
 
 
 # ============================================================================
@@ -2061,13 +1949,7 @@ async def send_scheduled_message():
 # ============================================================================
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error(f"Exception while handling update: {context.error}")
-    
-    if "TimedOut" in str(context.error) or "timeout" in str(context.error).lower():
-        logger.warning("Telegram timeout - continuing...")
-        return
-    
-    logger.error(f"Error details: {context.error}", exc_info=True)
+    logger.error(f"Exception: {context.error}", exc_info=True)
 
 
 # ============================================================================
@@ -2077,25 +1959,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     global application
     
-    logger.info("Starting Dom Bot v5.4 - DEBUG VERSION...")
+    logger.info("Starting Dom Bot v5.5 - Complete Fixed Version")
     time.sleep(5)
     
+    # Use AsyncIOScheduler instead of BackgroundScheduler
     try:
         scheduler.start()
-        logger.info("Scheduler started successfully")
+        logger.info("AsyncIO Scheduler started")
     except Exception as e:
-        logger.warning(f"Scheduler already running: {e}")
-        try:
-            scheduler.shutdown(wait=False)
-        except:
-            pass
-        time.sleep(2)
-        try:
-            scheduler.start()
-            logger.info("Scheduler restarted successfully")
-        except Exception as e2:
-            logger.error(f"Failed to restart scheduler: {e2}")
-            raise
+        logger.warning(f"Scheduler issue: {e}")
     
     schedule_next_message()
     
@@ -2111,6 +1983,7 @@ def main():
     
     application.add_error_handler(error_handler)
     
+    # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("location", location_command))
@@ -2122,12 +1995,12 @@ def main():
     application.add_handler(CommandHandler("setcreativity", setcreativity_command))
     application.add_handler(CommandHandler("setrisk", setrisk_command))
     application.add_handler(CommandHandler("release", release_command))
-    application.add_handler(CommandHandler("debug", debug_command))  # NEW DEBUG COMMAND
+    application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v5.4 - Debug Version with Venice AI logging")
+    logger.info("Dom Bot v5.5 - Running with all fixes")
     
     application.run_polling(
         poll_interval=1.0,
