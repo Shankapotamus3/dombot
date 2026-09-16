@@ -1019,7 +1019,7 @@ async def check_escalation_wrapper(chat_id: str):
 
 
 # ============================================================================
-# MESSAGE HANDLERS - WITH ACTIVE TASK CHECK
+# MESSAGE HANDLERS
 # ============================================================================
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is_command: bool = False):
@@ -1073,7 +1073,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
                 )
                 return
         
-        # NEW: Check if user has active task before generating new one
+        # Check if user has active task before generating new one
         if user.current_task_id:
             task = db.query(Task).filter(Task.id == user.current_task_id).first()
             if task and task.status == TaskStatus.PENDING.value:
@@ -1261,6 +1261,10 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
         db.close()
 
 
+# ============================================================================
+# BUTTON CALLBACK - FIXED FOR BOTH CAPTION AND TEXT
+# ============================================================================
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1335,13 +1339,29 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Avatar: {'on' if user.parameters.avatar_enabled else 'off'}")
             return
         
+        # FIXED: Handle both caption and text messages
         if data.startswith("complete_"):
             task_id = int(data.split("_")[1])
             task = db.query(Task).filter(Task.id == task_id).first()
             if task and task.status == TaskStatus.PENDING.value:
                 context.user_data["awaiting_photo_type"] = "task_completion"
                 context.user_data["awaiting_photo_task_id"] = task_id
-                await query.edit_message_caption(caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send selfie", 950))
+                
+                # FIX: Check if message has caption before editing
+                try:
+                    if query.message.caption:
+                        await query.edit_message_caption(
+                            caption=truncate_for_telegram(f"{query.message.caption}\n\n📸 Send selfie", 950)
+                        )
+                    elif query.message.text:
+                        await query.edit_message_text(
+                            text=truncate_for_telegram(f"{query.message.text}\n\n📸 Send selfie", 950)
+                        )
+                    else:
+                        await query.answer("📸 Send selfie to complete!")
+                except Exception as e:
+                    logger.warning(f"Could not edit message: {e}")
+                    await query.answer("📸 Send selfie to complete!")
             return
         
         if data.startswith("fail_"):
@@ -1355,7 +1375,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.awaiting_response = False
                 user.current_task_id = None
                 db.commit()
-                await query.edit_message_caption(caption="❌ FAILED")
+                await query.edit_message_text("❌ FAILED")
             return
         
     except Exception as e:
@@ -1637,7 +1657,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - WITH ACTIVE TASK CHECK
+# SCHEDULING
 # ============================================================================
 
 def schedule_next_message():
@@ -1695,14 +1715,13 @@ async def send_scheduled_message():
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # NEW: Don't send if user has active pending task
+        # Don't send if user has active pending task
         if user.current_task_id:
             task = db.query(Task).filter(Task.id == user.current_task_id).first()
             if task and task.status == TaskStatus.PENDING.value:
                 time_left = task.deadline - datetime.utcnow()
                 minutes_left = int(time_left.total_seconds() / 60)
                 logger.info(f"User has active task ({minutes_left}m left), skipping new scheduled message")
-                # Still schedule next check
                 schedule_next_message()
                 return
         
@@ -1797,8 +1816,7 @@ async def send_scheduled_message():
         except:
             pass
     
-    # Add delay to prevent pool exhaustion
-    await asyncio.sleep(2)
+    # REMOVED: asyncio.sleep(2) - was causing event loop issues
     
     schedule_next_message()
 
@@ -1824,7 +1842,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     global application
     
-    logger.info("Starting Dom Bot v5.2 - No Stacking...")
+    logger.info("Starting Dom Bot v5.3 - Fixed...")
     time.sleep(5)
     
     try:
@@ -1873,7 +1891,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v5.2 - No Stacking + Active Task Check")
+    logger.info("Dom Bot v5.3 - Fixed Caption + No Sleep")
     
     application.run_polling(
         poll_interval=1.0,
