@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-DOM Bot v5.5 - Complete Fixed Version
-- Fixed: Event loop closed error
-- Fixed: "Speak clearly, pet." fallback
-- Fixed: Complete button not working
-- Added: Debug logging for Venice AI
+DOM Bot v6.0 - Kink Customization Edition
+- 30 min timeout with punishment
+- Photo retry with explanations
+- Customizable kink preferences
 """
 
 import os
@@ -56,10 +55,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -163,7 +158,7 @@ class BotParameters(Base):
     psychological_focus = Column(Float, default=0.5)
     unpredictability = Column(Float, default=0.5)
     photo_demand_frequency = Column(Float, default=0.95)
-    task_timeout_minutes = Column(Integer, default=15)
+    task_timeout_minutes = Column(Integer, default=30)
     escalation_threshold = Column(Integer, default=2)
     verbosity = Column(String, default="medium")
     response_delay_enabled = Column(Boolean, default=True)
@@ -205,6 +200,29 @@ class BotParameters(Base):
     task_creativity_level = Column(Float, default=0.8)
     risk_tolerance = Column(Float, default=0.6)
     avoid_repetition = Column(Boolean, default=True)
+    
+    # KINK PREFERENCES (all default to True except extreme ones)
+    kink_exposure = Column(Boolean, default=True)
+    kink_humiliation = Column(Boolean, default=True)
+    kink_degradation = Column(Boolean, default=True)
+    kink_bondage = Column(Boolean, default=True)
+    kink_pain = Column(Boolean, default=False)
+    kink_service = Column(Boolean, default=True)
+    kink_edging = Column(Boolean, default=True)
+    kink_watersports = Column(Boolean, default=False)
+    kink_exhibitionism = Column(Boolean, default=True)
+    kink_roleplay = Column(Boolean, default=True)
+    kink_petplay = Column(Boolean, default=False)
+    kink_feminization = Column(Boolean, default=False)
+    kink_cbt = Column(Boolean, default=False)
+    kink_breathplay = Column(Boolean, default=False)
+    kink_sensory = Column(Boolean, default=True)
+    kink_temperature = Column(Boolean, default=True)
+    kink_marking = Column(Boolean, default=True)
+    kink_spanking = Column(Boolean, default=True)
+    kink_nipple = Column(Boolean, default=True)
+    kink_anal = Column(Boolean, default=False)
+    kink_gags = Column(Boolean, default=True)
     
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -347,10 +365,8 @@ Base.metadata.create_all(bind=engine)
 # CONFIGURATION
 # ============================================================================
 
-# Use AsyncIOScheduler instead of BackgroundScheduler to avoid event loop issues
 scheduler = AsyncIOScheduler()
 
-# API Keys
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 USER_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 VENICE_API_KEY = os.getenv("VENICE_API_KEY")
@@ -429,30 +445,192 @@ HAIR_COLORS = {
     "platinum": "platinum blonde hair", "silver": "silver hair", "bald": "bald head",
 }
 
-TASK_CATEGORIES = {
-    "exposure": {"descriptions": ["naked", "strip", "undress", "bare", "expose", "display"], "risk_multiplier": 1.2},
-    "position": {"descriptions": ["kneel", "bend", "position", "pose", "present", "assume"], "risk_multiplier": 1.0},
-    "service": {"descriptions": ["clean", "prepare", "arrange", "service", "organize"], "risk_multiplier": 0.8},
-    "degradation": {"descriptions": ["write", "mark", "label", "admit", "confess", "acknowledge"], "risk_multiplier": 1.3},
-    "edging": {"descriptions": ["edge", "stroke", "touch", "arouse", "deny", "control"], "risk_multiplier": 1.4},
-    "public_risk": {"descriptions": ["public", "outside", "visible", "window", "balcony", "car"], "risk_multiplier": 1.5},
-    "humiliation": {"descriptions": ["embarrass", "shame", "humiliate", "demean", "belittle"], "risk_multiplier": 1.3},
-    "physical": {"descriptions": ["hold", "maintain", "endure", "suffer", "challenge"], "risk_multiplier": 1.1},
+# ============================================================================
+# KINK CATEGORIES
+# ============================================================================
+
+KINK_CATEGORIES = {
+    "exposure": {
+        "name": "Exposure/Nudity",
+        "description": "Tasks involving nudity, stripping, revealing",
+        "db_field": "kink_exposure",
+        "intensity": "medium",
+    },
+    "humiliation": {
+        "name": "Humiliation",
+        "description": "Verbal degradation, embarrassing tasks",
+        "db_field": "kink_humiliation",
+        "intensity": "medium",
+    },
+    "degradation": {
+        "name": "Degradation",
+        "description": "Writing, marking, objectification",
+        "db_field": "kink_degradation",
+        "intensity": "high",
+    },
+    "bondage": {
+        "name": "Bondage/Restraint",
+        "description": "Self-bondage, holding positions, restricted movement",
+        "db_field": "kink_bondage",
+        "intensity": "high",
+    },
+    "pain": {
+        "name": "Pain/Impact",
+        "description": "Spanking, slapping, clamps, CBT",
+        "db_field": "kink_pain",
+        "intensity": "extreme",
+    },
+    "service": {
+        "name": "Service",
+        "description": "Cleaning, organizing, domestic tasks",
+        "db_field": "kink_service",
+        "intensity": "low",
+    },
+    "edging": {
+        "name": "Edging/Orgasm Control",
+        "description": "Stroking, denial, orgasm control",
+        "db_field": "kink_edging",
+        "intensity": "high",
+    },
+    "watersports": {
+        "name": "Watersports",
+        "description": "Piss play, toilet tasks",
+        "db_field": "kink_watersports",
+        "intensity": "extreme",
+    },
+    "exhibitionism": {
+        "name": "Exhibitionism",
+        "description": "Public risk, windows, outdoor",
+        "db_field": "kink_exhibitionism",
+        "intensity": "extreme",
+    },
+    "roleplay": {
+        "name": "Roleplay",
+        "description": "Scenario-based tasks, character play",
+        "db_field": "kink_roleplay",
+        "intensity": "medium",
+    },
+    "petplay": {
+        "name": "Pet Play",
+        "description": "Puppy, kitty, animal behaviors",
+        "db_field": "kink_petplay",
+        "intensity": "medium",
+    },
+    "feminization": {
+        "name": "Feminization/Sissification",
+        "description": "Wearing panties, feminine poses, makeup",
+        "db_field": "kink_feminization",
+        "intensity": "medium",
+    },
+    "cbt": {
+        "name": "CBT",
+        "description": "Cock and ball torture, ball busting",
+        "db_field": "kink_cbt",
+        "intensity": "extreme",
+    },
+    "breathplay": {
+        "name": "Breath Play",
+        "description": "Choking, breath holding, smothering",
+        "db_field": "kink_breathplay",
+        "intensity": "extreme",
+    },
+    "sensory": {
+        "name": "Sensory Play",
+        "description": "Blindfolds, earplugs, sensation",
+        "db_field": "kink_sensory",
+        "intensity": "medium",
+    },
+    "temperature": {
+        "name": "Temperature Play",
+        "description": "Ice, heat, cold exposure",
+        "db_field": "kink_temperature",
+        "intensity": "medium",
+    },
+    "marking": {
+        "name": "Marking/Writing",
+        "description": "Body writing, sharpie, lipstick",
+        "db_field": "kink_marking",
+        "intensity": "low",
+    },
+    "spanking": {
+        "name": "Spanking",
+        "description": "Self-spanking, implements, counting",
+        "db_field": "kink_spanking",
+        "intensity": "high",
+    },
+    "nipple": {
+        "name": "Nipple Play",
+        "description": "Clamps, twisting, stimulation",
+        "db_field": "kink_nipple",
+        "intensity": "medium",
+    },
+    "anal": {
+        "name": "Anal Play",
+        "description": "Plugs, fingers, prostate",
+        "db_field": "kink_anal",
+        "intensity": "high",
+    },
+    "gags": {
+        "name": "Gags/Mouth",
+        "description": "Gags, mouth stuffing, drool",
+        "db_field": "kink_gags",
+        "intensity": "medium",
+    },
 }
 
 CREATIVE_FALLBACKS = [
-    "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and body. 10 min.",
-    "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind. 8 min.",
-    "Stand at your window, curtains open, wearing only underwear. Selfie showing outside view. 5 min.",
-    "Write 'OWNED' on your chest with marker. Naked selfie in mirror. 10 min.",
-    "Edge once, then stop. Kneel naked, hands behind back. Selfie showing your face. 10 min.",
-    "Bend over your bed, cheek to the surface, naked. Mirror selfie from side. 8 min.",
-    "Stand in front of mirror, naked, holding your phone at arm's length. Full body visible. 5 min.",
-    "Kneel on floor, back straight, hands behind head, naked. Selfie from above. 10 min.",
+    "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and body.",
+    "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind.",
+    "Stand at your window, curtains open, wearing only underwear. Selfie showing outside view.",
+    "Write 'OWNED' on your chest with marker. Naked selfie in mirror.",
+    "Edge once, then stop. Kneel naked, hands behind back. Selfie showing your face.",
+    "Bend over your bed, cheek to the surface, naked. Mirror selfie from side.",
+    "Stand in front of mirror, naked, holding your phone at arm's length. Full body visible.",
+    "Kneel on floor, back straight, hands behind head, naked. Selfie from above.",
 ]
 
 # ============================================================================
-# AI RESPONSE (DEBUG VERSION)
+# KINK HELPER FUNCTIONS
+# ============================================================================
+
+def get_allowed_kinks(user: UserState) -> List[str]:
+    """Get list of kink categories the user has enabled"""
+    params = user.parameters
+    allowed = []
+    
+    for kink_id, kink_data in KINK_CATEGORIES.items():
+        if getattr(params, kink_data['db_field'], True):
+            allowed.append(kink_id)
+    
+    return allowed if allowed else ["exposure"]
+
+def get_kink_status_text(user: UserState) -> str:
+    """Generate status text of enabled/disabled kinks"""
+    params = user.parameters
+    enabled = []
+    disabled = []
+    
+    for kink_id, kink_data in KINK_CATEGORIES.items():
+        if getattr(params, kink_data['db_field'], True):
+            enabled.append(kink_data['name'])
+        else:
+            disabled.append(kink_data['name'])
+    
+    text = "*ENABLED:*\n"
+    text += "✅ " + "\n✅ ".join(enabled[:10])
+    if len(enabled) > 10:
+        text += f"\n_...and {len(enabled) - 10} more_"
+    
+    if disabled:
+        text += "\n\n*DISABLED:*\n"
+        text += "❌ " + "\n❌ ".join(disabled[:5])
+        if len(disabled) > 5:
+            text += f"\n_...and {len(disabled) - 5} more_"
+    
+    return text
+
+# ============================================================================
+# AI RESPONSE
 # ============================================================================
 
 def build_adaptive_system_prompt(user: UserState, db: Session) -> str:
@@ -484,9 +662,6 @@ RULES:
 
 
 def generate_ai_response(user: UserState, user_message: str, db: Session) -> str:
-    """
-    Generate AI response with full debugging
-    """
     logger.info("=" * 60)
     logger.info("GENERATE_AI_RESPONSE CALLED")
     logger.info("=" * 60)
@@ -496,7 +671,6 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
         return random.choice(CREATIVE_FALLBACKS)
     
     logger.info(f"VENICE_API_KEY present: {bool(VENICE_API_KEY)}")
-    logger.info(f"VENICE_API_KEY length: {len(VENICE_API_KEY)}")
     
     try:
         system_prompt = build_adaptive_system_prompt(user, db)
@@ -544,15 +718,11 @@ def generate_ai_response(user: UserState, user_message: str, db: Session) -> str
                 return content
             except (KeyError, IndexError, json.JSONDecodeError) as e:
                 logger.error(f"Parse error: {e}")
-                logger.error(f"Raw: {response.text[:500]}")
                 return random.choice(CREATIVE_FALLBACKS)
         
         logger.error(f"API Error {response.status_code}: {response.text[:500]}")
         return random.choice(CREATIVE_FALLBACKS)
         
-    except requests.exceptions.Timeout:
-        logger.error("Venice API Timeout")
-        return random.choice(CREATIVE_FALLBACKS)
     except Exception as e:
         logger.error(f"Exception: {e}", exc_info=True)
         return random.choice(CREATIVE_FALLBACKS)
@@ -603,27 +773,19 @@ USER CONTEXT:
 - Specific location: {user.location_detail or 'not specified'}
 - Intensity level: {user.intensity}
 - Time: {datetime.utcnow().strftime('%H:%M')} UTC
-- PHOTO TYPE: Selfie (one hand holding phone, arm visible in frame)
 
 ANALYSIS INSTRUCTIONS:
 1. Does the photo show the requested nudity/exposure level?
-2. Is the position/pose as commanded? (Remember: selfies have limited angles)
-3. Can you see their arm/hand holding the phone? (Expected for selfies)
+2. Is the position/pose as commanded?
+3. Can you see their arm/hand holding the phone?
 4. Does the setting match the task location?
-5. Is there evidence of obedience/compliance?
-
-SELFIE REALITY CHECK:
-- Selfies are taken at arm's length or in mirrors
-- One hand is holding the phone (may be visible in frame)
-- Angles are limited to what a person can reach
-- Background context matters more than perfect framing
 
 Respond in this exact format:
 VERDICT: [VERIFIED or FAILED]
 CONFIDENCE: [high/medium/low]
-ANALYSIS: [Your detailed explanation of what you see]
+ANALYSIS: [Your detailed explanation]
 
-Be strict but fair. Selfies are harder to pose perfectly - focus on compliance, not professional photography."""
+Be strict but fair. Selfies are harder to pose perfectly - focus on compliance."""
 
     try:
         response = requests.post(
@@ -700,7 +862,7 @@ def get_conversational_verification_response(verified: bool, confidence: str, an
 
 
 # ============================================================================
-# TASK GENERATION
+# TASK GENERATION WITH KINKS
 # ============================================================================
 
 def get_recent_task_hashes(db: Session, user_id: int, hours: int = 48) -> Set[str]:
@@ -726,22 +888,26 @@ async def generate_creative_ai_task(user: UserState, db: Session) -> dict:
     else:
         time_period = "night"
     
+    # GET ALLOWED KINKS FOR THIS USER
+    allowed_kinks = get_allowed_kinks(user)
     recent_hashes = get_recent_task_hashes(db, user.id)
-    categories = list(TASK_CATEGORIES.keys())
     
+    # Filter by intensity preference
+    preferred = []
     if intensity == IntensityLevel.EXTREME.value:
-        preferred = ["public_risk", "edging", "degradation", "humiliation"]
+        preferred = [k for k in allowed_kinks if KINK_CATEGORIES[k]['intensity'] in ['high', 'extreme']]
     elif intensity == IntensityLevel.HIGH.value:
-        preferred = ["exposure", "edging", "degradation", "physical"]
-    elif intensity == IntensityLevel.MEDIUM.value:
-        preferred = ["exposure", "position", "degradation", "physical"]
+        preferred = [k for k in allowed_kinks if KINK_CATEGORIES[k]['intensity'] in ['medium', 'high', 'extreme']]
     else:
-        preferred = ["position", "service", "physical", "exposure"]
+        preferred = allowed_kinks
     
-    if random.random() < creativity:
+    # Select from allowed kinks
+    if preferred and random.random() < creativity:
         selected_category = random.choice(preferred)
     else:
-        selected_category = random.choice(categories)
+        selected_category = random.choice(allowed_kinks) if allowed_kinks else "exposure"
+    
+    kink_info = KINK_CATEGORIES[selected_category]
     
     risk_level = "medium"
     if risk_tolerance > 0.8 or intensity == IntensityLevel.EXTREME.value:
@@ -753,7 +919,9 @@ async def generate_creative_ai_task(user: UserState, db: Session) -> dict:
     recent_descriptions = [t.task_description for t in recent_tasks]
     recent_text = "\n".join([f"- {d}" for d in recent_descriptions]) if recent_descriptions else "None yet."
     
-    prompt = f"""Create a UNIQUE, CREATIVE, and DARING BDSM task (MAX 350 CHARACTERS).
+    prompt = f"""Create a UNIQUE, CREATIVE BDSM task focused on: {kink_info['name']}
+
+KINK FOCUS: {kink_info['description']}
 
 CRITICAL RULES:
 1. The photo MUST be a SELFIE taken by the submissive holding their phone in ONE HAND
@@ -769,20 +937,18 @@ INTENSITY: {intensity}
 CONTEXT:
 - Location: {location} ({location_detail if location_detail else 'use creative specifics'})
 - Time: {time_period}
-- Creativity Level: {creativity}/1.0 (higher = more daring/unique)
+- Creativity Level: {creativity}/1.0
 
 SELFIE CONSTRAINTS:
 - One hand holds phone (arm may be visible)
 - Limited to arm's reach or mirrors
-- No impossible angles (behind, ceiling, etc.)
-- Timer mode allowed for floor shots
+- No impossible angles
 
-Example creative tasks:
-- "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and feet. 10 min."
-- "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind. 8 min."
-- "Stand at your window, curtains open, wearing only underwear. Selfie showing outside view. 5 min."
+Example tasks:
+- "Strip naked. Lie on your bed with legs up against wall. Selfie showing your face and feet."
+- "Kneel on bathroom floor, forehead touching tile, naked. Mirror selfie from behind."
 
-Create something UNIQUE and DARING:
+Create something UNIQUE:
 
 TASK:"""
 
@@ -836,16 +1002,19 @@ TASK:"""
         
     except Exception as e:
         logger.error(f"AI task generation failed: {e}")
+        # Pick from allowed kinks for fallback
+        allowed = get_allowed_kinks(user)
+        fallback_category = random.choice(allowed) if allowed else "exposure"
         fallback = random.choice(CREATIVE_FALLBACKS)
         return {
             "description": fallback,
-            "task_type": selected_category,
+            "task_type": fallback_category,
             "requires_photo": True,
             "is_extended_hold": False,
             "location_type": location,
             "difficulty": intensity,
             "ai_generated": False,
-            "task_category": selected_category,
+            "task_category": fallback_category,
             "risk_level": "medium",
             "creativity_score": 0.5,
         }
@@ -860,25 +1029,42 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
         return await generate_creative_ai_task(user, db)
     else:
         location = user.current_location or "home"
+        # Filter templates by allowed kinks
+        allowed = get_allowed_kinks(user)
+        
         templates = {
-            "home": [
-                "Strip naked. Lie on your back on the floor, legs up the wall. Selfie showing your face and body. {timeout} min.",
-                "Naked in front of your open window, back to the glass. Selfie in mirror showing the view. {timeout} min.",
-                "Kneel on your bed, face down, ass up. Mirror selfie from behind. {timeout} min.",
+            "exposure": [
+                "Strip naked. Lie on your back on the floor, legs up the wall. Selfie showing your face and body.",
+                "Naked in front of your open window, back to the glass. Selfie in mirror showing the view.",
+                "Kneel on your bed, face down, ass up. Mirror selfie from behind.",
             ],
-            "work": [
-                "Office bathroom: strip naked, sit on toilet lid, legs spread. Selfie from above. {timeout} min.",
-                "Naked in your office chair, feet on desk. Quick selfie. {timeout} min.",
+            "degradation": [
+                "Write 'SLAVE' on your chest with marker. Naked selfie in mirror.",
+                "Kneel naked with 'PROPERTY' written on your forehead. Mirror selfie.",
             ],
-            "public": [
-                "Public bathroom stall: naked, kneel facing toilet. Selfie from above. {timeout} min.",
-                "Your car: strip below waist, seat back. Selfie showing steering wheel. {timeout} min.",
+            "position": [
+                "Hold plank position naked. Selfie from below showing your strain.",
+                "Wall sit position, naked, back against wall. Selfie showing your face.",
+            ],
+            "service": [
+                "Clean your floor naked on hands and knees. Selfie from behind.",
+                "Kneel naked beside your bed, making it perfectly. Mirror selfie.",
             ],
         }
-        location_templates = templates.get(location, templates["home"])
-        template = random.choice(location_templates)
+        
+        # Only use templates from allowed kinks
+        available_templates = []
+        for kink, temps in templates.items():
+            if kink in allowed:
+                available_templates.extend(temps)
+        
+        if not available_templates:
+            available_templates = templates["exposure"]  # Fallback
+        
+        template = random.choice(available_templates)
+        
         return {
-            "description": template.format(timeout=params.task_timeout_minutes),
+            "description": template,
             "task_type": location,
             "requires_photo": True,
             "is_extended_hold": False,
@@ -892,16 +1078,27 @@ async def get_smart_task_for_user(user: UserState, db: Session) -> dict:
 
 
 async def expire_old_tasks(user: UserState, db: Session):
+    """Clear expired tasks - no punishment, just cleanup"""
     cutoff = datetime.utcnow() - timedelta(minutes=user.parameters.task_timeout_minutes + 5)
     
-    old_tasks = db.query(Task).filter(Task.user_id == user.id, Task.status == TaskStatus.PENDING.value, Task.created_at < cutoff).all()
+    old_tasks = db.query(Task).filter(
+        Task.user_id == user.id, 
+        Task.status == TaskStatus.PENDING.value, 
+        Task.created_at < cutoff
+    ).all()
+    
     for task in old_tasks:
         task.status = TaskStatus.EXPIRED.value
-        logger.info(f"Expired old task {task.id}")
+        logger.info(f"Task {task.id} expired (auto-cleared)")
     
     if user.current_task_id:
         current_task = db.query(Task).filter(Task.id == user.current_task_id).first()
-        if not current_task or current_task.status in [TaskStatus.COMPLETED.value, TaskStatus.FAILED.value, TaskStatus.EXPIRED.value, TaskStatus.RELEASED.value]:
+        if not current_task or current_task.status in [
+            TaskStatus.COMPLETED.value, 
+            TaskStatus.FAILED.value, 
+            TaskStatus.EXPIRED.value, 
+            TaskStatus.RELEASED.value
+        ]:
             user.current_task_id = None
             user.awaiting_response = False
             logger.info(f"Cleared stale task for user {user.id}")
@@ -1061,18 +1258,6 @@ def offer_alternative_task(user: UserState, original_task: Task, db: Session) ->
     }
 
 
-def escalate_intensity(current: IntensityLevel) -> IntensityLevel:
-    levels = list(IntensityLevel)
-    idx = levels.index(current)
-    return levels[idx + 1] if idx < len(levels) - 1 else current
-
-
-def deescalate_intensity(current: IntensityLevel) -> IntensityLevel:
-    levels = list(IntensityLevel)
-    idx = levels.index(current)
-    return levels[idx - 1] if idx > 0 else current
-
-
 # ============================================================================
 # MESSAGE HANDLERS
 # ============================================================================
@@ -1197,7 +1382,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         ai_badge = "🤖 " if task_data.get("ai_generated") else ""
         description = truncate_for_telegram(task_data['description'], 600)
         full_message = truncate_for_telegram(
-            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {params.task_timeout_minutes} min\n\n📸 SELFIE REQUIRED",
+            f"{ai_badge}📋 TASK:\n{description}\n\n⏰ You have 30 minutes to complete.\n\n📸 SELFIE REQUIRED",
             950
         )
         
@@ -1212,17 +1397,49 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         else:
             await update.message.reply_text(full_message, reply_markup=InlineKeyboardMarkup(keyboard))
         
-        # Schedule escalation check
-        async def escalation_check():
-            await asyncio.sleep(params.task_timeout_minutes * 60)
+        # Schedule task auto-clear with punishment after 30 minutes
+        timeout_minutes = params.task_timeout_minutes
+        chat_id = str(update.effective_chat.id)
+        task_id = task.id
+        
+        async def auto_clear_task_with_punishment():
+            """Auto-clear task after timeout with punishment"""
+            await asyncio.sleep(timeout_minutes * 60)
             db2 = SessionLocal()
             try:
-                user2 = get_or_create_user(db2, str(update.effective_chat.id))
-                await check_escalation(db2, user2)
+                user2 = get_or_create_user(db2, chat_id)
+                task2 = db2.query(Task).filter(Task.id == task_id).first()
+                
+                if task2 and task2.status == TaskStatus.PENDING.value:
+                    task2.status = TaskStatus.EXPIRED.value
+                    user2.failed_tasks += 1
+                    user2.consecutive_failures += 1
+                    user2.current_streak = 0
+                    user2.reward_points = max(0, user2.reward_points - 10)
+                    user2.current_task_id = None
+                    user2.awaiting_response = False
+                    db2.commit()
+                    
+                    punishments = [
+                        "⏰ Task expired. You took too long. -10 points. Don't let it happen again.",
+                        "⏰ Time's up, pet. You failed me. -10 points. Streak broken.",
+                        "⏰ 30 minutes passed. Task expired. -10 points. Disappointing.",
+                        "⏰ You kept me waiting too long. Task cancelled. -10 points.",
+                    ]
+                    
+                    if application and application.bot:
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=random.choice(punishments)
+                        )
+                    logger.info(f"Task {task_id} expired with punishment")
+                    
+            except Exception as e:
+                logger.error(f"Auto-clear error: {e}")
             finally:
                 db2.close()
         
-        asyncio.create_task(escalation_check())
+        asyncio.create_task(auto_clear_task_with_punishment())
                 
     except Exception as e:
         logger.error(f"Process message error: {e}", exc_info=True)
@@ -1252,6 +1469,8 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text("No photo detected.")
             return
         
+        is_retry = context.user_data.get("photo_retry_count", 0) > 0
+        
         photo = update.message.photo[-1]
         file = await photo.get_file()
         photo_bytes = await file.download_as_bytearray()
@@ -1275,12 +1494,13 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             user.reward_points += 5
             user.current_task_id = None
             
+            context.user_data.pop("photo_retry_count", None)
+            context.user_data.pop("awaiting_photo_type", None)
+            context.user_data.pop("awaiting_photo_task_id", None)
+            
             favorites = user.favorite_tasks or []
             favorites.append(getattr(task, 'task_category', 'general'))
             user.favorite_tasks = favorites[-10:]
-            
-            context.user_data.pop("awaiting_photo_type", None)
-            context.user_data.pop("awaiting_photo_task_id", None)
             
             response_text = get_conversational_verification_response(True, verification['confidence'], verification['analysis'], user.current_streak)
             
@@ -1293,26 +1513,79 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
             db.commit()
             
         else:
-            task.status = TaskStatus.FAILED.value
-            user.failed_tasks += 1
-            user.consecutive_failures += 1
-            user.current_streak = 0
-            user.awaiting_response = False
-            user.reward_points = max(0, user.reward_points - 10)
-            user.current_task_id = None
+            retry_count = context.user_data.get("photo_retry_count", 0)
             
-            context.user_data.pop("awaiting_photo_type", None)
-            context.user_data.pop("awaiting_photo_task_id", None)
-            
-            response_text = get_conversational_verification_response(False, verification['confidence'], verification['analysis'], 0)
-            
-            image_data = AvatarGenerator.generate_avatar(user, AvatarMood.SUSPICIOUS, db)
-            if image_data:
-                await update.message.reply_photo(photo=InputFile(io.BytesIO(image_data), filename="suspicious.jpg"), caption=response_text)
+            if retry_count == 0:
+                context.user_data["photo_retry_count"] = 1
+                
+                analysis = verification['analysis']
+                reason = "Photo did not meet requirements."
+                
+                if "clothed" in analysis.lower() or "clothing" in analysis.lower():
+                    reason = "❌ You were supposed to be naked/less clothed."
+                elif "pose" in analysis.lower() or "position" in analysis.lower():
+                    reason = "❌ Your position/pose was incorrect."
+                elif "location" in analysis.lower():
+                    reason = "❌ Wrong location or setting."
+                elif "angle" in analysis.lower() or "selfie" in analysis.lower():
+                    reason = "❌ Photo angle or selfie technique was wrong."
+                elif "lighting" in analysis.lower() or "dark" in analysis.lower():
+                    reason = "❌ Photo too dark or poor lighting."
+                elif "blurry" in analysis.lower() or "unclear" in analysis.lower():
+                    reason = "❌ Photo was blurry or unclear."
+                
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Try Again", callback_data=f"retry_photo_{task_id}")],
+                    [InlineKeyboardButton("✗ Give Up", callback_data=f"fail_{task_id}")],
+                ]
+                
+                message = (
+                    f"❌ VERIFICATION FAILED\n\n"
+                    f"**Why:** {reason}\n\n"
+                    f"**Details:** {truncate_for_telegram(analysis, 300)}\n\n"
+                    f"⚠️ This is your **second chance**. Fix the issue and send a new photo, "
+                    f"or give up (-10 points, streak broken)."
+                )
+                
+                image_data = AvatarGenerator.generate_avatar(user, AvatarMood.SUSPICIOUS, db)
+                if image_data:
+                    await update.message.reply_photo(
+                        photo=InputFile(io.BytesIO(image_data), filename="suspicious.jpg"),
+                        caption=message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(keyboard))
+                
+                db.commit()
+                
             else:
-                await update.message.reply_text(response_text)
-            
-            db.commit()
+                task.status = TaskStatus.FAILED.value
+                user.failed_tasks += 1
+                user.consecutive_failures += 1
+                user.current_streak = 0
+                user.awaiting_response = False
+                user.reward_points = max(0, user.reward_points - 10)
+                user.current_task_id = None
+                
+                context.user_data.pop("photo_retry_count", None)
+                context.user_data.pop("awaiting_photo_type", None)
+                context.user_data.pop("awaiting_photo_task_id", None)
+                
+                response_text = (
+                    f"❌ FAILED - Second attempt rejected.\n\n"
+                    f"**Analysis:** {truncate_for_telegram(verification['analysis'], 200)}\n\n"
+                    f"Streak broken. -10 points. Try harder next time."
+                )
+                
+                image_data = AvatarGenerator.generate_avatar(user, AvatarMood.DISAPPOINTED, db)
+                if image_data:
+                    await update.message.reply_photo(photo=InputFile(io.BytesIO(image_data), filename="disappointed.jpg"), caption=response_text)
+                else:
+                    await update.message.reply_text(response_text)
+                
+                db.commit()
             
     except Exception as e:
         logger.error(f"Photo handler error: {e}", exc_info=True)
@@ -1322,13 +1595,11 @@ async def enhanced_photo_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 # ============================================================================
-# BUTTON CALLBACK - FIXED
+# BUTTON CALLBACK
 # ============================================================================
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    
-    # IMPORTANT: Answer callback immediately to prevent timeout
     await query.answer()
     
     db = SessionLocal()
@@ -1338,6 +1609,35 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await expire_old_tasks(user, db)
         
         data = query.data
+        
+        # Handle kink toggles
+        if data.startswith("kink_toggle_"):
+            kink_id = data.replace("kink_toggle_", "")
+            if kink_id in KINK_CATEGORIES:
+                field = KINK_CATEGORIES[kink_id]['db_field']
+                current = getattr(user.parameters, field, True)
+                setattr(user.parameters, field, not current)
+                db.commit()
+                
+                # Refresh display
+                await display_kinks_menu(update, context, user)
+            return
+        
+        if data == "kink_reset_on":
+            for kink_data in KINK_CATEGORIES.values():
+                setattr(user.parameters, kink_data['db_field'], True)
+            db.commit()
+            await query.answer("All kinks enabled")
+            await display_kinks_menu(update, context, user)
+            return
+        
+        if data == "kink_reset_off":
+            for kink_data in KINK_CATEGORIES.values():
+                setattr(user.parameters, kink_data['db_field'], False)
+            db.commit()
+            await query.answer("All kinks disabled")
+            await display_kinks_menu(update, context, user)
+            return
         
         if data.startswith("loc_"):
             location_map = {"loc_home": LocationType.HOME, "loc_work": LocationType.WORK, "loc_public": LocationType.PUBLIC, "loc_transit": LocationType.TRANSIT}
@@ -1389,7 +1689,37 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Avatar: {'on' if user.parameters.avatar_enabled else 'off'}")
             return
         
-        # FIXED: Handle Complete button
+        # Handle Retry Photo button
+        if data.startswith("retry_photo_"):
+            task_id = int(data.split("_")[2])
+            task = db.query(Task).filter(Task.id == task_id).first()
+            
+            if not task or task.status != TaskStatus.PENDING.value:
+                await query.answer("Task no longer active.")
+                return
+            
+            context.user_data["awaiting_photo_type"] = "task_completion"
+            context.user_data["awaiting_photo_task_id"] = task_id
+            
+            await query.answer("Send your new photo")
+            
+            try:
+                if query.message.caption:
+                    await query.edit_message_caption(
+                        caption="📸 **SECOND CHANCE**\n\nSend your corrected photo now. Get it right this time.",
+                        parse_mode='Markdown'
+                    )
+                elif query.message.text:
+                    await query.edit_message_text(
+                        text="📸 **SECOND CHANCE**\n\nSend your corrected photo now. Get it right this time.",
+                        parse_mode='Markdown'
+                    )
+            except Exception as e:
+                await update.effective_chat.send_message("📸 Send your corrected photo.")
+            
+            return
+        
+        # Handle Complete button
         if data.startswith("complete_"):
             task_id = int(data.split("_")[1])
             task = db.query(Task).filter(Task.id == task_id).first()
@@ -1402,11 +1732,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text("This task is no longer active.")
                 return
             
-            # Set up photo expectation
             context.user_data["awaiting_photo_type"] = "task_completion"
             context.user_data["awaiting_photo_task_id"] = task_id
             
-            # Edit message to show waiting for photo
             try:
                 if query.message.caption:
                     new_caption = truncate_for_telegram(f"{query.message.caption}\n\n📸 Send your selfie now!", 950)
@@ -1450,9 +1778,65 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # COMMANDS
 # ============================================================================
 
+async def display_kinks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user: UserState = None):
+    """Display kink settings menu"""
+    if user is None:
+        db = SessionLocal()
+        try:
+            user = get_or_create_user(db, str(update.effective_chat.id))
+        finally:
+            db.close()
+    
+    params = user.parameters
+    
+    keyboard = []
+    row = []
+    
+    for kink_id, kink_data in KINK_CATEGORIES.items():
+        enabled = getattr(params, kink_data['db_field'], True)
+        status = "✅" if enabled else "❌"
+        
+        button = InlineKeyboardButton(
+            f"{status} {kink_data['name']}",
+            callback_data=f"kink_toggle_{kink_id}"
+        )
+        row.append(button)
+        
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("🔄 Enable All", callback_data="kink_reset_on")])
+    keyboard.append([InlineKeyboardButton("⛔ Disable All", callback_data="kink_reset_off")])
+    
+    text = (
+        "*KINK SETTINGS*\n\n"
+        "Toggle kinks on/off. Only enabled kinks will appear in tasks.\n\n"
+        f"{get_kink_status_text(user)}\n\n"
+        "Use `/kinks [name]` to toggle by text\n"
+        "Example: `/kinks pain`"
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    else:
+        await update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me (race → build → hair)\n/setfrequency - How often I message you\n/setcreativity - How daring/creative (0-1)\n/setrisk - Risk tolerance (0-1)\n/release - Give up current task\n/debug - Test AI connection"
+        "Welcome, pet.\n\n/status - Standing\n/location - Set location\n/locationdetail - Be specific\n/kinks - Customize kinks\n/nightmode - Toggle night\n/selfie - My image\n/avatar - Customize me\n/setfrequency - How often I message\n/setcreativity - How daring (0-1)\n/setrisk - Risk tolerance (0-1)\n/release - Give up task\n/debug - Test AI connection"
     )
 
 
@@ -1474,6 +1858,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 current_task_info = "\n✅ No active task"
         
+        # Count enabled kinks
+        enabled_count = len(get_allowed_kinks(user))
+        
         text = f"""
 📊 Status
 Location: {user.current_location}{loc_detail}
@@ -1481,10 +1868,9 @@ Avatar: {race.title()} {user.parameters.avatar_build}, {HAIR_COLORS.get(hair, ha
 Tasks: {user.completed_tasks}/{user.total_tasks}
 Streak: 🔥 {user.current_streak}
 Points: ⭐ {user.reward_points}
-Frequency: Every {user.parameters.min_interval_minutes}-{user.parameters.max_interval_minutes} min
+Timeout: {user.parameters.task_timeout_minutes} min | Frequency: {user.parameters.min_interval_minutes}-{user.parameters.max_interval_minutes} min
 Creativity: {user.parameters.task_creativity_level:.1f} | Risk: {user.parameters.risk_tolerance:.1f}
-AI Tasks: {'On' if user.location_detail else 'Set /locationdetail'}
-Claude: claude-opus-4-8-fast{current_task_info}
+Kinks: {enabled_count}/{len(KINK_CATEGORIES)} enabled{current_task_info}
 """
         await update.message.reply_text(text)
     finally:
@@ -1507,13 +1893,51 @@ async def location_detail_command(update: Update, context: ContextTypes.DEFAULT_
         
         if not context.args:
             current = user.location_detail or "Not set"
-            await update.message.reply_text(f"Current: {current}\n\n/locationdetail bedroom\n/locationdetail 'office alone'")
+            await update.message.reply_text(f"Current: {current}\n\n/locationdetail bedroom")
             return
         
         detail = " ".join(context.args)
         user.location_detail = detail
         db.commit()
-        await update.message.reply_text(f"📍 Set: {detail}\nAI tasks will use this!")
+        await update.message.reply_text(f"📍 Set: {detail}")
+    finally:
+        db.close()
+
+
+async def kinks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show and toggle kink preferences"""
+    db = SessionLocal()
+    try:
+        user = get_or_create_user(db, str(update.effective_chat.id))
+        
+        if not context.args:
+            await display_kinks_menu(update, context, user)
+            return
+        
+        # Toggle specific kink by name
+        kink_name = " ".join(context.args).lower()
+        matched = None
+        
+        for kink_id, kink_data in KINK_CATEGORIES.items():
+            if kink_name in kink_id or kink_name in kink_data['name'].lower():
+                matched = kink_id
+                break
+        
+        if matched:
+            current = getattr(user.parameters, KINK_CATEGORIES[matched]['db_field'], True)
+            setattr(user.parameters, KINK_CATEGORIES[matched]['db_field'], not current)
+            db.commit()
+            
+            status = "ON ✅" if not current else "OFF ❌"
+            await update.message.reply_text(
+                f"*{KINK_CATEGORIES[matched]['name']}*: {status}\n\n"
+                f"{get_kink_status_text(user)}",
+                parse_mode='Markdown'
+            )
+        else:
+            available = "\n".join([f"• {k['name']}" for k in KINK_CATEGORIES.values()])
+            await update.message.reply_text(f"Kink not found. Available:\n{available}")
+            
     finally:
         db.close()
 
@@ -1557,7 +1981,7 @@ async def selfie_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_or_create_user(db, str(update.effective_chat.id))
         race = getattr(user.parameters, 'avatar_race', 'white')
         hair = getattr(user.parameters, 'avatar_hair_color', 'black')
-        await update.message.reply_text(f"Generating {race} {user.parameters.avatar_build} with {HAIR_COLORS.get(hair, hair)}...")
+        await update.message.reply_text(f"Generating {race} {user.parameters.avatar_build}...")
         
         mood = AvatarMood.PLEASED if user.current_streak >= 3 else AvatarMood.COMMANDING
         image_data = AvatarGenerator.generate_avatar(user, mood, db)
@@ -1589,12 +2013,9 @@ async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYP
         
         if len(context.args) < 2:
             await update.message.reply_text(
-                f"Current: Every {params.min_interval_minutes}-{params.max_interval_minutes} minutes\n\n"
-                f"Usage:\n"
-                f"/setfrequency 15 30  → Every 15-30 minutes\n"
-                f"/setfrequency 60 180 → Every 1-3 hours\n"
-                f"/setfrequency 240 480 → Every 4-8 hours\n"
-                f"/setfrequency 0 0 → Disable scheduled messages"
+                f"Current: Every {params.min_interval_minutes}-{params.max_interval_minutes} min\n"
+                f"Timeout: {params.task_timeout_minutes} min\n\n"
+                f"Usage: /setfrequency 30 60"
             )
             return
         
@@ -1621,14 +2042,7 @@ async def setfrequency_command(update: Update, context: ContextTypes.DEFAULT_TYP
         db.commit()
         
         schedule_next_message()
-        
-        hours_min = min_min / 60
-        hours_max = max_min / 60
-        
-        if hours_min < 1:
-            await update.message.reply_text(f"✅ Set: Every {min_min}-{max_min} minutes")
-        else:
-            await update.message.reply_text(f"✅ Set: Every {hours_min:.1f}-{hours_max:.1f} hours")
+        await update.message.reply_text(f"✅ Set: Every {min_min}-{max_min} minutes")
         
     except ValueError:
         await update.message.reply_text("❌ Use numbers: /setfrequency 60 180")
@@ -1642,13 +2056,7 @@ async def setcreativity_command(update: Update, context: ContextTypes.DEFAULT_TY
         user = get_or_create_user(db, str(update.effective_chat.id))
         
         if not context.args:
-            await update.message.reply_text(
-                f"Current creativity: {user.parameters.task_creativity_level:.1f}/1.0\n\n"
-                f"Usage: /setcreativity 0.9\n"
-                f"0.3 = Safe and repetitive\n"
-                f"0.7 = Creative variety\n"
-                f"0.9 = Highly creative and daring"
-            )
+            await update.message.reply_text(f"Current creativity: {user.parameters.task_creativity_level:.1f}/1.0")
             return
         
         level = float(context.args[0])
@@ -1656,10 +2064,10 @@ async def setcreativity_command(update: Update, context: ContextTypes.DEFAULT_TY
         
         user.parameters.task_creativity_level = level
         db.commit()
-        await update.message.reply_text(f"✅ Creativity set to {level:.1f}")
+        await update.message.reply_text(f"✅ Creativity: {level:.1f}")
         
     except ValueError:
-        await update.message.reply_text("❌ Use a number between 0 and 1")
+        await update.message.reply_text("❌ Use 0-1")
     finally:
         db.close()
 
@@ -1670,13 +2078,7 @@ async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = get_or_create_user(db, str(update.effective_chat.id))
         
         if not context.args:
-            await update.message.reply_text(
-                f"Current risk tolerance: {user.parameters.risk_tolerance:.1f}/1.0\n\n"
-                f"Usage: /setrisk 0.8\n"
-                f"0.3 = Safe and private\n"
-                f"0.6 = Moderate risk\n"
-                f"0.9 = High risk, public exposure"
-            )
+            await update.message.reply_text(f"Current risk: {user.parameters.risk_tolerance:.1f}/1.0")
             return
         
         level = float(context.args[0])
@@ -1684,10 +2086,10 @@ async def setrisk_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user.parameters.risk_tolerance = level
         db.commit()
-        await update.message.reply_text(f"✅ Risk tolerance set to {level:.1f}")
+        await update.message.reply_text(f"✅ Risk: {level:.1f}")
         
     except ValueError:
-        await update.message.reply_text("❌ Use a number between 0 and 1")
+        await update.message.reply_text("❌ Use 0-1")
     finally:
         db.close()
 
@@ -1715,17 +2117,7 @@ async def release_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test Venice AI connection"""
-    await update.message.reply_text("🔍 Testing Venice AI connection...")
-    
-    logger.info("=" * 60)
-    logger.info("DEBUG COMMAND")
-    logger.info("=" * 60)
-    
-    checks = []
-    checks.append(f"TELEGRAM_BOT_TOKEN: {'✅ Set' if TELEGRAM_BOT_TOKEN else '❌ Missing'}")
-    checks.append(f"VENICE_API_KEY: {'✅ Set' if VENICE_API_KEY else '❌ Missing'}")
-    checks.append(f"USER_CHAT_ID: {'✅ Set' if USER_CHAT_ID else '❌ Missing'}")
+    await update.message.reply_text("🔍 Testing Venice AI...")
     
     if not VENICE_API_KEY:
         await update.message.reply_text("❌ VENICE_API_KEY not set!")
@@ -1741,7 +2133,6 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             json={
                 "model": "claude-opus-4-8-fast",
                 "messages": [{"role": "user", "content": "Say 'Venice AI is working!'"}],
-                "temperature": 0.9,
                 "max_tokens": 100
             },
             timeout=30
@@ -1750,17 +2141,12 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if response.status_code == 200:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
-            result = (
-                f"✅ Venice AI is working!\n\n"
-                f"Environment:\n" + "\n".join(checks) + f"\n\n"
-                f"Response: {content}"
-            )
-            await update.message.reply_text(result)
+            await update.message.reply_text(f"✅ {content}")
         else:
-            await update.message.reply_text(f"❌ API Error {response.status_code}:\n{response.text[:500]}")
+            await update.message.reply_text(f"❌ Error {response.status_code}")
             
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ {str(e)}")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1768,7 +2154,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================================
-# SCHEDULING - FIXED WITH ASYNCIO SCHEDULER
+# SCHEDULING
 # ============================================================================
 
 def schedule_next_message():
@@ -1803,30 +2189,19 @@ def schedule_next_message():
         if current_hour >= night_mode_end:
             next_time += timedelta(days=1)
         
-        scheduler.add_job(
-            send_scheduled_message, 
-            trigger="date", 
-            run_date=next_time, 
-            id="dom_message"
-        )
+        scheduler.add_job(send_scheduled_message, trigger="date", run_date=next_time, id="dom_message")
         logger.info(f"Scheduled for after night mode: {next_time}")
     else:
-        scheduler.add_job(
-            send_scheduled_message, 
-            trigger=IntervalTrigger(minutes=minutes), 
-            id="dom_message"
-        )
+        scheduler.add_job(send_scheduled_message, trigger=IntervalTrigger(minutes=minutes), id="dom_message")
         logger.info(f"Scheduled next message in {minutes} minutes")
 
 
 async def send_scheduled_message():
-    """Send scheduled message - runs in async context"""
     db = SessionLocal()
     try:
         user = get_or_create_user(db, USER_CHAT_ID)
         params = user.parameters
         
-        # Don't send if user has active pending task
         if user.current_task_id:
             task = db.query(Task).filter(Task.id == user.current_task_id).first()
             if task and task.status == TaskStatus.PENDING.value:
@@ -1891,7 +2266,7 @@ async def send_scheduled_message():
     ai_badge = "🤖 " if task_ai_generated else ""
     description = truncate_for_telegram(task_description, 600)
     full_message = truncate_for_telegram(
-        f"{ai_badge}📋 TASK:\n{description}\n\n⏰ {timeout_minutes} min\n\n📸 SELFIE REQUIRED",
+        f"{ai_badge}📋 TASK:\n{description}\n\n⏰ You have 30 minutes to complete.\n\n📸 SELFIE REQUIRED",
         950
     )
     
@@ -1921,27 +2296,9 @@ async def send_scheduled_message():
                 await asyncio.sleep(2 ** attempt)
     
     if not sent:
-        logger.error("Failed to send scheduled message after 3 attempts")
+        logger.error("Failed to send scheduled message")
     
     schedule_next_message()
-
-
-async def check_escalation(db: Session, user: UserState):
-    if not user.awaiting_response:
-        return
-    
-    if user.last_message_time is None:
-        return
-    
-    params = user.parameters
-    time_since = datetime.utcnow() - user.last_message_time
-    if time_since > timedelta(minutes=params.task_timeout_minutes):
-        user.intensity = escalate_intensity(IntensityLevel(user.intensity)).value
-        user.consecutive_failures += 1
-        user.current_streak = 0
-        db.commit()
-        if application and application.bot:
-            await application.bot.send_message(chat_id=user.chat_id, text="⬆️ ESCALATION. You failed me.")
 
 
 # ============================================================================
@@ -1959,10 +2316,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 def main():
     global application
     
-    logger.info("Starting Dom Bot v5.5 - Complete Fixed Version")
+    logger.info("Starting Dom Bot v6.0 - Kink Customization Edition")
     time.sleep(5)
     
-    # Use AsyncIOScheduler instead of BackgroundScheduler
     try:
         scheduler.start()
         logger.info("AsyncIO Scheduler started")
@@ -1983,11 +2339,11 @@ def main():
     
     application.add_error_handler(error_handler)
     
-    # Add handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("location", location_command))
     application.add_handler(CommandHandler("locationdetail", location_detail_command))
+    application.add_handler(CommandHandler("kinks", kinks_command))
     application.add_handler(CommandHandler("nightmode", nightmode_command))
     application.add_handler(CommandHandler("selfie", selfie_command))
     application.add_handler(CommandHandler("avatar", avatar_command))
@@ -2000,7 +2356,7 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, enhanced_photo_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logger.info("Dom Bot v5.5 - Running with all fixes")
+    logger.info("Dom Bot v6.0 - Running with kink customization")
     
     application.run_polling(
         poll_interval=1.0,
