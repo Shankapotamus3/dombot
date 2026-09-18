@@ -37,18 +37,18 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 DATABASE_URL = os.getenv('DATABASE_URL')
-VENVENICE_API_KEY = os.getenv('VENVENICE_API_KEY')
+VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 VENICE_API_URL = "https://api.venice.ai/api/v1/chat/completions"
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
 if not DATABASE_URL:
     raise ValueError("DATABASE_URL not set!")
-if not VENVENICE_API_KEY:
-    raise ValueError("VENVENICE_API_KEY not set!")
+if not VENICE_API_KEY:
+    raise ValueError("VENICE_API_KEY not set!")
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN not set!")
 
-logger.info(f"API Key present: {bool(VENVENICE_API_KEY)}")
+logger.info(f"API Key present: {bool(VENICE_API_KEY)}")
 logger.info(f"Database present: {bool(DATABASE_URL)}")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -320,7 +320,7 @@ def generate_ai_response(prompt: str, max_tokens: int = 500, temperature: float 
         response = requests.post(
             VENICE_API_URL,
             headers={
-                "Authorization": f"Bearer {VENVENICE_API_KEY}",
+                "Authorization": f"Bearer {VENICE_API_KEY}",
                 "Content-Type": "application/json"
             },
             json={
@@ -389,7 +389,7 @@ Be strict but fair. Selfies are harder to pose perfectly."""
         response = requests.post(
             VENICE_API_URL,
             headers={
-                "Authorization": f"Bearer {VENVENICE_API_KEY}",
+                "Authorization": f"Bearer {VENICE_API_KEY}",
                 "Content-Type": "application/json"
             },
             json={
