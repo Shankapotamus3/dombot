@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
-DOM Bot v10.0 - Location-Based Random Tasks
-Proper photo verification, random intervals, location-aware AI generation
+DOM Bot v10.2 - Fixed AI Integration & Photo Verification
+Incorporates working patterns from v5.3
 """
 
 import os
 import logging
 import asyncio
 import random
+import io
+import base64
+import re
+import hashlib
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,23 +24,39 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, desc
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import requests
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
+# Configuration
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENVENICE_API_KEY = os.getenv('VENVENICE_API_KEY')
-VENVENICE_MODEL = "claude-opus-4-8-fast"
+VENICE_API_URL = "https://api.venice.ai/api/v1/chat/completions"
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL not set!")
+if not VENVENICE_API_KEY:
+    raise ValueError("VENVENICE_API_KEY not set!")
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set!")
+
+logger.info(f"API Key present: {bool(VENVENICE_API_KEY)}")
+logger.info(f"Database present: {bool(DATABASE_URL)}")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Base = declarative_base()
 Session = sessionmaker(bind=engine)
 
-# Configuration
+# ==================== CONFIGURATION ====================
+
 GENDERS = ['male', 'female', 'trans']
 ETHNICITIES = ['white', 'black', 'asian', 'hispanic']
 BODY_TYPES = ['slim', 'average', 'muscular', 'curvy']
@@ -44,7 +64,6 @@ PUBIC_STYLES = ['shaved', 'trimmed', 'natural']
 HAIR_COLORS = ['blonde', 'brown', 'red', 'black', 'white', 'bald']
 FEMALE_SIZES = ['small', 'medium', 'large']
 MALE_SIZES = ['small', 'medium', 'large']
-LOCATIONS = ['home', 'public', 'work']
 
 KINK_CATEGORIES = {
     'exposure': 'Public Exposure',
@@ -78,22 +97,26 @@ KINK_CATEGORIES = {
 }
 
 RISK_LEVELS = {
-    1: 'Safe (Private, no risk)',
-    2: 'Low (Minimal exposure risk)',
-    3: 'Medium (Semi-public possible)',
-    4: 'High (Public nudity likely)',
-    5: 'Extreme (Dangerous public exposure, NO unwilling participants)'
+    1: 'Safe (Private)',
+    2: 'Low (Minimal risk)',
+    3: 'Medium (Semi-public)',
+    4: 'High (Public likely)',
+    5: 'Extreme (Dangerous, ethical only - no unwilling participants)'
 }
 
-CREATIVITY_LEVELS = {
-    1: 'Standard',
-    2: 'Creative',
-    3: 'Very Creative',
-    4: 'Unpredictable',
-    5: 'Chaotic'
+# Task categories for variety
+TASK_CATEGORIES = {
+    'exposure': ['naked', 'strip', 'undress', 'bare', 'expose', 'display'],
+    'position': ['kneel', 'bend', 'position', 'pose', 'present', 'assume'],
+    'service': ['clean', 'prepare', 'arrange', 'service', 'organize'],
+    'degradation': ['write', 'mark', 'label', 'admit', 'confess'],
+    'edging': ['edge', 'stroke', 'touch', 'arouse', 'deny'],
+    'public_risk': ['public', 'outside', 'visible', 'window', 'balcony', 'door'],
+    'humiliation': ['embarrass', 'shame', 'humiliate', 'demean'],
+    'physical': ['hold', 'maintain', 'endure', 'suffer', 'challenge'],
 }
 
-# ==================== DATABASE ====================
+# ==================== DATABASE MODELS ====================
 
 class BotParameters(Base):
     __tablename__ = 'bot_parameters'
@@ -133,15 +156,15 @@ class BotParameters(Base):
     exposure_risk = Column(Boolean, default=False)
     social_media = Column(Boolean, default=False)
     
-    # Scheduling - RANDOM INTERVAL
-    min_interval_minutes = Column(Integer, default=30)  # Minimum time between tasks
-    max_interval_minutes = Column(Integer, default=120)  # Maximum time between tasks
-    next_task_time = Column(DateTime)  # When next task will be sent
+    # Random interval scheduling
+    min_interval_minutes = Column(Integer, default=30)
+    max_interval_minutes = Column(Integer, default=120)
+    next_task_time = Column(DateTime)
     scheduling_enabled = Column(Boolean, default=True)
     
     # Location
-    location_type = Column(String, default='home')  # home, public, work
-    location_details = Column(Text)  # Custom details like "2 bedroom apt, roommate home evenings"
+    location_type = Column(String, default='home')
+    location_details = Column(Text)
     
     # Stats
     total_tasks_completed = Column(Integer, default=0)
@@ -155,6 +178,7 @@ class BotParameters(Base):
     task_assigned_at = Column(DateTime)
     task_completed = Column(Boolean, default=False)
     photo_retry_count = Column(Integer, default=0)
+    recent_task_hashes = Column(Text, default='')  # Store recent task hashes to avoid repeats
     
     # Avatar
     avatar_name = Column(String, default='Mistress')
@@ -181,13 +205,15 @@ class TaskHistory(Base):
     id = Column(Integer, primary_key=True)
     chat_id = Column(String, nullable=False)
     task_description = Column(Text, nullable=False)
+    task_hash = Column(String)  # For tracking duplicates
     risk_level = Column(Integer, default=3)
     location_type = Column(String)
     assigned_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)
     status = Column(String, default='assigned')
     verification_photo_url = Column(String)
-    ai_verification_result = Column(Text)  # Store AI verification reasoning
+    ai_verification_result = Column(Text)
+    ai_analysis = Column(Text)
     feedback = Column(Text)
 
 Base.metadata.create_all(engine)
@@ -202,6 +228,7 @@ def get_user(chat_id: str, username: str = None) -> Dict:
             user = BotParameters(chat_id=str(chat_id), username=username)
             session.add(user)
             session.commit()
+            logger.info(f"Created new user: {chat_id}")
         return {c.name: getattr(user, c.name) for c in user.__table__.columns}
     finally:
         session.close()
@@ -230,21 +257,35 @@ def toggle_kink(chat_id: str, kink_id: str) -> bool:
     finally:
         session.close()
 
-def log_task(chat_id: str, task: str, risk: int, location: str, status: str, 
-             photo: str = None, verification: str = None, feedback: str = None):
+def log_task(chat_id: str, task: str, task_hash: str, risk: int, location: str, 
+             status: str, photo: str = None, verification: str = None, analysis: str = None):
     session = Session()
     try:
         session.add(TaskHistory(
             chat_id=str(chat_id),
             task_description=task,
+            task_hash=task_hash,
             risk_level=risk,
             location_type=location,
             status=status,
             verification_photo_url=photo,
             ai_verification_result=verification,
-            feedback=feedback
+            ai_analysis=analysis
         ))
         session.commit()
+    finally:
+        session.close()
+
+def get_recent_hashes(chat_id: str, hours: int = 48) -> Set[str]:
+    """Get recent task hashes to avoid repetition"""
+    session = Session()
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        recent = session.query(TaskHistory).filter(
+            TaskHistory.chat_id == str(chat_id),
+            TaskHistory.assigned_at > cutoff
+        ).all()
+        return {t.task_hash for t in recent if t.task_hash}
     finally:
         session.close()
 
@@ -252,30 +293,40 @@ def get_history(chat_id: str, limit: int = 10):
     session = Session()
     try:
         hist = session.query(TaskHistory).filter_by(chat_id=str(chat_id))\
-            .order_by(TaskHistory.assigned_at.desc()).limit(limit).all()
+            .order_by(desc(TaskHistory.assigned_at)).limit(limit).all()
         return [{
             'task': h.task_description, 
             'status': h.status, 
             'risk': h.risk_level,
-            'verification': h.ai_verification_result
+            'verification': h.ai_verification_result,
+            'analysis': h.ai_analysis
         } for h in hist]
     finally:
         session.close()
 
-# ==================== AI FUNCTIONS ====================
+def get_task_hash(description: str) -> str:
+    """Generate hash for task deduplication"""
+    normalized = re.sub(r'\d+', 'NUM', description.lower().strip())
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+    return hashlib.md5(normalized.encode()).hexdigest()[:16]
 
-def generate_ai_response(prompt: str, max_tokens: int = 500, temperature: float = 0.8) -> str:
-    """Generate AI response"""
-    if not VENVENICE_API_KEY:
-        return None
+# ==================== FIXED AI FUNCTIONS ====================
+
+def generate_ai_response(prompt: str, max_tokens: int = 500, temperature: float = 0.8) -> Optional[str]:
+    """Generate AI response with proper error handling"""
     try:
-        r = requests.post(
-            "https://api.venice.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {VENVENICE_API_KEY}", "Content-Type": "application/json"},
+        logger.debug(f"Sending to AI: {prompt[:100]}...")
+        
+        response = requests.post(
+            VENICE_API_URL,
+            headers={
+                "Authorization": f"Bearer {VENVENICE_API_KEY}",
+                "Content-Type": "application/json"
+            },
             json={
-                "model": VENVENICE_MODEL,
+                "model": "claude-opus-4-8-fast",
                 "messages": [
-                    {"role": "system", "content": "You are a dominant AI assistant."},
+                    {"role": "system", "content": "You are a dominant AI assistant generating BDSM tasks and verifying photo submissions."},
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": max_tokens,
@@ -283,104 +334,266 @@ def generate_ai_response(prompt: str, max_tokens: int = 500, temperature: float 
             },
             timeout=30
         )
-        if r.status_code == 200:
-            return r.json()['choices'][0]['message']['content']
-        logger.error(f"AI error: {r.status_code}")
+        
+        logger.debug(f"AI Response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            content = result["choices"][0]["message"]["content"]
+            return content.strip()
+        else:
+            logger.error(f"AI API error: {response.status_code} - {response.text}")
+            return None
+            
     except Exception as e:
-        logger.error(f"AI exception: {e}")
-    return None
+        logger.error(f"AI request failed: {e}")
+        return None
 
-def generate_location_task(user: Dict) -> str:
-    """Generate AI task based on location and settings"""
+async def verify_photo_with_ai(task_description: str, photo_bytes: bytes) -> dict:
+    """
+    ACTUAL photo verification using AI vision
+    Sends the actual image bytes to Claude for analysis
+    """
+    try:
+        # Convert photo to base64
+        photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
+        
+        prompt = f"""You are verifying BDSM task completion from a selfie photo.
+
+TASK REQUIREMENTS:
+"{task_description}"
+
+This is a SELFIE taken by the submissive holding their phone.
+
+ANALYZE THE IMAGE CAREFULLY:
+1. Does the photo show the requested nudity/exposure level?
+2. Is the position/pose as commanded? (remember selfies have limited angles)
+3. Can you see their arm/hand holding the phone? (expected for selfies)
+4. Does the setting match the task?
+5. Is there genuine evidence of compliance?
+
+SELFIE REALITY CHECK:
+- Selfies are taken at arm's length or in mirrors
+- One hand holds the phone (may be visible)
+- Angles are limited to what a person can reach
+- Focus on compliance, not professional photography
+
+Respond EXACTLY in this format:
+VERDICT: [VERIFIED or FAILED]
+CONFIDENCE: [high/medium/low]
+ANALYSIS: [Your detailed explanation of what you see in the image]
+
+Be strict but fair. Selfies are harder to pose perfectly."""
+
+        # Send request with image
+        response = requests.post(
+            VENICE_API_URL,
+            headers={
+                "Authorization": f"Bearer {VENVENICE_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "claude-opus-4-8-fast",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{photo_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 500,
+                "temperature": 0.2
+            },
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            analysis = result["choices"][0]["message"]["content"]
+            
+            # Parse response
+            is_verified = "VERIFIED" in analysis.upper() and "FAILED" not in analysis.upper()
+            
+            confidence = "low"
+            if "high" in analysis.lower():
+                confidence = "high"
+            elif "medium" in analysis.lower():
+                confidence = "medium"
+            
+            # Extract reasoning
+            reasoning = ""
+            for line in analysis.split('\n'):
+                if 'analysis:' in line.lower():
+                    reasoning = line.split(':', 1)[1].strip()
+                    break
+            
+            return {
+                "verified": is_verified,
+                "confidence": confidence,
+                "reasoning": reasoning or analysis[:200],
+                "full_analysis": analysis
+            }
+        else:
+            logger.error(f"Vision API error: {response.status_code}")
+            # Default to accepting if API fails
+            return {
+                "verified": True,
+                "confidence": "low",
+                "reasoning": "AI verification unavailable, accepting photo",
+                "full_analysis": "API error"
+            }
+            
+    except Exception as e:
+        logger.error(f"Photo verification error: {e}")
+        return {
+            "verified": True,
+            "confidence": "low",
+            "reasoning": f"Verification error: {str(e)[:100]}",
+            "full_analysis": str(e)
+        }
+
+def generate_creative_task(user: Dict) -> dict:
+    """
+    Generate creative AI task based on location and settings
+    Tracks history to avoid repetition
+    """
     
-    # Build context
+    # Get context
     location = user.get('location_type', 'home')
-    details = user.get('location_details', '') or 'No specific details'
+    details = user.get('location_details', '') or 'standard room'
     risk = user.get('risk_level', 3)
     creativity = user.get('creativity_level', 3)
     gender = user.get('avatar_gender', 'female')
     name = user.get('avatar_name', 'Mistress')
     
-    # Build allowed kinks
-    allowed = []
-    disabled = []
-    for k, v in KINK_CATEGORIES.items():
-        if user.get(k, False):
-            allowed.append(v)
-        else:
-            disabled.append(v)
+    # Get recent hashes to avoid repetition
+    recent_hashes = get_recent_hashes(user['chat_id'])
     
-    # Risk descriptions
+    # Determine category based on risk and creativity
+    if risk >= 4:
+        preferred_cats = ['public_risk', 'exposure', 'degradation', 'edging']
+    elif risk >= 3:
+        preferred_cats = ['exposure', 'edging', 'degradation', 'position']
+    else:
+        preferred_cats = ['position', 'service', 'physical', 'exposure']
+    
+    # Select category
+    if random.random() < (creativity / 5):
+        selected_category = random.choice(preferred_cats)
+    else:
+        selected_category = random.choice(list(TASK_CATEGORIES.keys()))
+    
+    # Get recent tasks for prompt
+    session = Session()
+    try:
+        recent_tasks = session.query(TaskHistory).filter_by(chat_id=user['chat_id'])\
+            .order_by(desc(TaskHistory.assigned_at)).limit(5).all()
+        recent_descriptions = [t.task_description for t in recent_tasks]
+        recent_text = "\n".join([f"- {d[:100]}..." for d in recent_descriptions]) if recent_descriptions else "None yet."
+    finally:
+        session.close()
+    
+    # Build prompt
+    social_enabled = user.get('social_media', False)
+    social_instruction = "Social media tasks ALLOWED" if social_enabled else "NO social media - keep offline"
+    
     risk_desc = {
-        1: "Completely private, no chance of being seen",
-        2: "Minimal risk, unlikely to be seen",
-        3: "Possible risk of being seen but not certain",
-        4: "Likely to be seen or exposed to public",
-        5: "EXTREME: Dangerous exposure possible, but NO tasks involving unwilling participants (no flashing strangers, no involving delivery drivers, etc.). Tasks can involve: opening front door naked, outdoor nudity in secluded areas, etc."
+        1: "Safe and private, no exposure risk",
+        2: "Low risk, minimal chance of being seen", 
+        3: "Medium risk, semi-public possible",
+        4: "High risk, public exposure likely",
+        5: "EXTREME risk - dangerous exposure but NO unwilling participants (no flashing strangers/delivery drivers). Self-exposure only: open doors naked, outdoor nudity, etc."
     }.get(risk, "Medium risk")
     
-    # Creativity
-    creativity_desc = {
-        1: "Standard, predictable tasks",
-        2: "Some creativity",
-        3: "Creative and varied",
-        4: "Highly unpredictable and creative",
-        5: "Extremely chaotic, bizarre, unexpected"
-    }.get(creativity, "Creative")
-    
-    # Social media
-    social = user.get('social_media', False)
-    social_instruction = "Social media tasks ALLOWED" if social else "NO social media tasks"
-    
-    prompt = f"""Generate a BDSM task for a submissive.
-
-DOMINANT: {name} ({gender})
-LOCATION: {location}
-LOCATION DETAILS: {details}
-
-RISK LEVEL {risk}/5: {risk_desc}
-CREATIVITY LEVEL {creativity}/5: {creativity_desc}
-{social_instruction}
-
-ALLOWED KINKS: {', '.join(allowed)}
-FORBIDDEN: {', '.join(disabled[:5])}
+    prompt = f"""Create a UNIQUE, CREATIVE BDSM task (MAX 400 CHARACTERS).
 
 CRITICAL RULES:
-- Task MUST be completable at/in: {location}
-- Use location details: {details}
-- Risk {risk}/5 means: {risk_desc}
-- If risk is 5: NO tasks involving unwilling participants (no flashing delivery drivers, strangers, public harassment). Extreme self-exposure ONLY (open door naked, outdoor nudity in appropriate areas, etc.)
-- If marking forbidden: NO writing on body
-- If social_media disabled: NO online posting
-- Task must be completable in 30 minutes
-- Be specific and creative
+1. Photo MUST be a SELFIE (one hand holding phone)
+2. Be SPECIFIC - use exact furniture, rooms, objects from location
+3. Make it CHALLENGING but possible as selfie
+4. NEVER repeat these recent tasks:
+{recent_text}
 
-Generate ONE specific task:"""
+TASK CATEGORY: {selected_category.upper()}
+RISK LEVEL {risk}/5: {risk_desc}
+{social_instruction}
+
+LOCATION: {location}
+LOCATION DETAILS: {details}
+TIME: {(datetime.utcnow() - timedelta(hours=7)).strftime('%H:%M')}
+
+SELFIE CONSTRAINTS:
+- One hand holds phone (arm may be visible in frame)
+- Limited to arm's reach or mirrors
+- No impossible angles
+- Timer mode allowed for floor shots
+
+BE SPECIFIC WITH:
+- Exact furniture names (bed, couch, desk, chair, table)
+- Specific rooms (kitchen, bathroom, bedroom, living room)
+- Exact time limits (not "a few minutes" - use "8 min", "12 min")
+- Exact dress state (not "undressed" - use "completely naked", "underwear only")
+
+RISK GUIDE:
+- Risk 1-2: Private rooms, locked doors, no windows
+- Risk 3: Windows possible, semi-private areas
+- Risk 4: Near windows, doors, possible visibility
+- Risk 5: EXTREME - open doors, outdoor areas, high visibility BUT ethical (no involving others)
+
+Create something CREATIVE and SPECIFIC:
+
+TASK:"""
+
+    # Generate task
+    ai_description = generate_ai_response(prompt, 400, 0.9)
     
-    response = generate_ai_response(prompt, 400, 0.9)
-    
-    if response:
-        # Clean up response
-        task = response.strip()
-        # Remove quotes if present
-        if task.startswith('"') and task.endswith('"'):
-            task = task[1:-1]
-        # Remove "Task:" prefix if present
-        if task.lower().startswith('task:'):
-            task = task[5:].strip()
-        return task
+    if ai_description:
+        # Clean up
+        ai_description = ai_description.strip().strip('"\'')
+        if ai_description.lower().startswith('task:'):
+            ai_description = ai_description[5:].strip()
+        
+        # Ensure length
+        if len(ai_description) > 400:
+            ai_description = ai_description[:397] + "..."
+        
+        # Ensure selfie mentioned
+        if 'selfie' not in ai_description.lower() and 'photo' not in ai_description.lower():
+            ai_description += " Selfie proof required."
+        
+        # Check for duplicates
+        task_hash = get_task_hash(ai_description)
+        if task_hash in recent_hashes:
+            logger.info("Task too similar to recent, using fallback")
+            return generate_fallback_task(user, selected_category)
+        
+        return {
+            "description": ai_description,
+            "task_hash": task_hash,
+            "category": selected_category,
+            "ai_generated": True,
+            "risk_level": risk,
+            "location": location
+        }
     
     # Fallback if AI fails
-    return generate_location_fallback(user)
+    return generate_fallback_task(user, selected_category)
 
-def generate_location_fallback(user: Dict) -> str:
-    """Generate fallback based on location and risk"""
+def generate_fallback_task(user: Dict, category: str = None) -> dict:
+    """Generate fallback task if AI fails"""
     location = user.get('location_type', 'home')
     risk = user.get('risk_level', 3)
     name = user.get('avatar_name', 'Mistress')
     
-    # Location-specific tasks
-    tasks = {
+    # Location-specific fallbacks
+    fallbacks = {
         'home': {
             1: [f"{name} commands you to kneel in your living room and photograph your submission"],
             2: [f"Strip naked in your bedroom and take a photo near the window"],
@@ -404,64 +617,29 @@ def generate_location_fallback(user: Dict) -> str:
         }
     }
     
-    loc_tasks = tasks.get(location, tasks['home'])
+    loc_tasks = fallbacks.get(location, fallbacks['home'])
     risk_tasks = loc_tasks.get(risk, loc_tasks[3])
     
-    return random.choice(risk_tasks)
-
-def verify_photo_with_ai(task: str, photo_description: str) -> tuple:
-    """Verify photo actually shows task completion - LOOSE but functional verification"""
+    # Add social media if enabled
+    if user.get('social_media', False) and risk >= 4:
+        risk_tasks = risk_tasks + [
+            "Post a subtle exposed photo to your Instagram story, screenshot proof",
+            "Send a risky photo to a random contact, screenshot their reaction",
+            "Post on Reddit gonewild with your photo, show the post"
+        ]
     
-    prompt = f"""Task given to submissive: "{task}"
-
-Photo submitted: {photo_description}
-
-Analyze if the photo shows evidence of the task being completed.
-
-Respond with:
-VERDICT: PASS or FAIL
-CONFIDENCE: High/Medium/Low
-REASONING: Brief explanation of what you see and why it passes or fails
-
-Be REASONABLE - if the photo shows a genuine attempt at the task, PASS it.
-Only FAIL if clearly wrong or completely unrelated."""
+    description = random.choice(risk_tasks)
     
-    result = generate_ai_response(prompt, 300, 0.7)
-    
-    if result:
-        # Parse result
-        verdict = "FAIL"
-        confidence = "Low"
-        reasoning = "Could not verify"
-        
-        result_lower = result.lower()
-        
-        # Check for pass/fail
-        if "verdict: pass" in result_lower or "pass" in result_lower[:100]:
-            verdict = "PASS"
-        elif "verdict: fail" in result_lower or "fail" in result_lower[:100]:
-            verdict = "FAIL"
-        
-        # Extract confidence
-        if "high" in result_lower:
-            confidence = "High"
-        elif "medium" in result_lower:
-            confidence = "Medium"
-        
-        # Extract reasoning
-        for line in result.split('\n'):
-            if 'reasoning:' in line.lower():
-                reasoning = line.split(':', 1)[1].strip()
-                break
-            elif 'reason' in line.lower() and ':' in line:
-                reasoning = line.split(':', 1)[1].strip()
-        
-        return verdict == "PASS", confidence, reasoning, result
-    
-    # If AI fails, default to accepting with warning
-    return True, "Low", "AI verification unavailable, accepting photo", "AI failed"
+    return {
+        "description": description,
+        "task_hash": get_task_hash(description),
+        "category": category or 'general',
+        "ai_generated": False,
+        "risk_level": risk,
+        "location": location
+    }
 
-# ==================== SCHEDULER - RANDOM INTERVALS ====================
+# ==================== RANDOM INTERVAL SCHEDULER ====================
 
 async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
     """Check if it's time to send a task based on random interval"""
@@ -478,9 +656,9 @@ async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
             # Check if next_task_time is set and passed
             if u.next_task_time:
                 if now < u.next_task_time:
-                    continue  # Not time yet
+                    continue
             else:
-                # First run - set next time
+                # First run - set initial next time
                 min_mins = u.min_interval_minutes or 30
                 max_mins = u.max_interval_minutes or 120
                 random_minutes = random.randint(min_mins, max_mins)
@@ -491,9 +669,11 @@ async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
             # Time to send task!
             user_dict = {c.name: getattr(u, c.name) for c in u.__table__.columns}
             
-            task_text = generate_location_task(user_dict)
+            # Generate creative task
+            task_data = generate_creative_task(user_dict)
             
-            u.current_task = task_text
+            # Update user
+            u.current_task = task_data['description']
             u.task_assigned_at = now
             u.task_completed = False
             
@@ -503,12 +683,19 @@ async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
             random_minutes = random.randint(min_mins, max_mins)
             u.next_task_time = now + timedelta(minutes=random_minutes)
             
+            # Update recent hashes
+            recent = u.recent_task_hashes or ''
+            hashes = recent.split(',')[-9:]  # Keep last 9
+            hashes.append(task_data['task_hash'])
+            u.recent_task_hashes = ','.join(hashes)
+            
             session.commit()
             
-            # Send task
+            # Send message
             try:
                 name = u.avatar_name or 'Mistress'
                 risk_emoji = "🔥" * u.risk_level
+                ai_badge = "🤖 " if task_data['ai_generated'] else ""
                 
                 keyboard = [[
                     InlineKeyboardButton("Complete", callback_data="complete_task"),
@@ -517,9 +704,9 @@ async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
                 
                 await context.bot.send_message(
                     chat_id=u.chat_id,
-                    text=f"""{risk_emoji} *Task from {name}*
+                    text=f"""{risk_emoji} {ai_badge}*Task from {name}*
 
-{task_text}
+{task_data['description']}
 
 ⏰ Complete within 30 minutes.
 
@@ -528,7 +715,18 @@ Next task in approximately {random_minutes} minutes.""",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
                 
-                asyncio.create_task(auto_expire(u.chat_id, 30, context))
+                # Log task
+                log_task(
+                    u.chat_id,
+                    task_data['description'],
+                    task_data['task_hash'],
+                    task_data['risk_level'],
+                    task_data['location'],
+                    'assigned'
+                )
+                
+                # Schedule auto-expire
+                asyncio.create_task(auto_expire_task(u.chat_id, 30, context))
                 
             except Exception as e:
                 logger.error(f"Failed to send task to {u.chat_id}: {e}")
@@ -536,7 +734,7 @@ Next task in approximately {random_minutes} minutes.""",
     finally:
         session.close()
 
-async def auto_expire(chat_id: str, minutes: int, context: ContextTypes.DEFAULT_TYPE):
+async def auto_expire_task(chat_id: str, minutes: int, context: ContextTypes.DEFAULT_TYPE):
     """Expire task after timeout"""
     await asyncio.sleep(minutes * 60)
     
@@ -544,8 +742,14 @@ async def auto_expire(chat_id: str, minutes: int, context: ContextTypes.DEFAULT_
     if user.get('current_task') and not user.get('task_completed'):
         name = user.get('avatar_name', 'Mistress')
         
-        log_task(chat_id, user['current_task'], user.get('risk_level', 3),
-                user.get('location_type', 'home'), 'expired')
+        log_task(
+            chat_id,
+            user['current_task'],
+            get_task_hash(user['current_task']),
+            user.get('risk_level', 3),
+            user.get('location_type', 'home'),
+            'expired'
+        )
         
         update_user(chat_id, {
             'total_tasks_failed': user['total_tasks_failed'] + 1,
@@ -557,7 +761,8 @@ async def auto_expire(chat_id: str, minutes: int, context: ContextTypes.DEFAULT_
         
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"⏰ *Task Expired*\n\n{name} is disappointed. -10 points."
+            text=f"⏰ *Task Expired*\n\n{name} is disappointed. -10 points.",
+            parse_mode='Markdown'
         )
 
 # ==================== HANDLERS ====================
@@ -567,43 +772,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(chat_id, update.effective_user.username)
     
     await update.message.reply_text(
-        f"""Welcome to DOM Bot v10.0 - Location Aware
+        f"""Welcome to DOM Bot v10.2 - Fixed AI Integration
 
 Your Chat ID: `{chat_id}`
 
-🎭 */avatar* - Create your dominant
-📍 */location* - Set location (home/public/work) + details
-⏱️ */interval* - Set random task interval (min-max minutes)
+🎭 */avatar* - Create your dominant (M/F/Trans)
+📍 */location* - Set location type + details
+⏱️ */interval* - Set random task interval (min-max)
 🔥 */risk* - Risk level 1-5 (5 = extreme but ethical)
-🎨 */creativity* - Creativity level
+🎨 */creativity* - Creativity level 1-5
 🚫 */limits* - Kink toggles (includes Social Media)
-📋 */task* - Get task NOW
+📋 */task* - Get task NOW (bypass schedule)
 📊 */status* - Your stats
 🎁 */reward* - Nude rewards
 
-Random tasks will be sent between your set interval times."""
+✅ FIXED: Photo verification now uses AI vision
+✅ FIXED: Tasks are AI-generated with variety
+✅ FIXED: Random intervals work correctly"""
     )
 
 async def location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set location"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
     keyboard = [
-        [InlineKeyboardButton(f"🏠 Home {'✅' if user.get('location_type')=='home' else ''}", 
-                              callback_data="loc_home")],
-        [InlineKeyboardButton(f"🏢 Work {'✅' if user.get('location_type')=='work' else ''}", 
-                              callback_data="loc_work")],
-        [InlineKeyboardButton(f"🌍 Public {'✅' if user.get('location_type')=='public' else ''}", 
-                              callback_data="loc_public")],
-        [InlineKeyboardButton("Add Location Details", callback_data="loc_details")]
+        [InlineKeyboardButton(f"🏠 Home {'✅' if user.get('location_type')=='home' else ''}", callback_data="loc_home")],
+        [InlineKeyboardButton(f"🏢 Work {'✅' if user.get('location_type')=='work' else ''}", callback_data="loc_work")],
+        [InlineKeyboardButton(f"🌍 Public {'✅' if user.get('location_type')=='public' else ''}", callback_data="loc_public")],
+        [InlineKeyboardButton("Set Details", callback_data="loc_details")]
     ]
     
     current = user.get('location_type', 'home')
-    details = user.get('location_details', 'None set')
+    details = user.get('location_details', 'Not set')
     
     await update.message.reply_text(
-        f"""📍 Current Location: {current.title()}
+        f"""📍 Location: {current.title()}
 Details: {details}
 
 Select location type:""",
@@ -618,12 +821,7 @@ async def loc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "loc_details":
         await query.edit_message_text(
-            "Send me details about your location:\n"
-            "Examples:\n"
-            "- '2 bedroom apartment, roommate home evenings'\n"
-            "- 'Office with cubicles, boss nearby'\n"
-            "- 'Car, can drive to secluded spots'\n\n"
-            "Use /setdetails <your details>"
+            "Send location details with:\n/setdetails <description>\n\nExamples:\n/setdetails 2 bedroom apartment, roommate home evenings\n/setdetails office cubicle, boss nearby\n/setdetails car, can drive to secluded spots"
         )
         return
     
@@ -631,27 +829,30 @@ async def loc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user(chat_id, {'location_type': loc})
     
     await query.edit_message_text(
-        f"✅ Location set to: {loc.title()}\n\n"
-        f"Use /setdetails to add specific details for better tasks."
+        f"✅ Location: {loc.title()}\n\n"
+        f"Now use /setdetails to add specifics for better AI tasks!"
     )
 
-async def setdetails_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set location details"""
+async def setdetails(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
-    details = ' '.join(context.args)
-    if not details:
+    if not context.args:
         await update.message.reply_text(
-            "Usage: /setdetails <description>\n"
-            "Example: /setdetails 2 bedroom apt, roommate home 6pm-8am"
+            "Usage: /setdetails <description>\n\n"
+            "Examples:\n"
+            "/setdetails 2 bedroom apartment, roommate home 6pm-8am\n"
+            "/setdetails office cubicle near window, boss nearby\n"
+            "/setdetails car, can drive to secluded spots\n"
+            "/setdetails parents house, bedroom upstairs"
         )
         return
     
+    details = ' '.join(context.args)
     update_user(chat_id, {'location_details': details})
-    await update.message.reply_text(f"✅ Location details saved:\n{details}")
+    
+    await update.message.reply_text(f"✅ Location details saved:\n{details}\n\nAI will use this for custom tasks!")
 
 async def interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set random interval"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
@@ -672,9 +873,9 @@ async def interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Current: {current_min}-{current_max} minutes
 
-Bot will send tasks at RANDOM times within this range.
+Bot sends tasks at RANDOM times within this range.
 
-Select interval:""",
+Select:""",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -686,8 +887,7 @@ async def interval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "int_custom":
         await query.edit_message_text(
-            "Use: /setinterval <min> <max>\n"
-            "Example: /setinterval 45 90"
+            "Use: /setinterval <min> <max>\nExample: /setinterval 45 90"
         )
         return
     
@@ -702,16 +902,13 @@ async def interval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'scheduling_enabled': True
     })
     
-    await query.edit_message_text(
-        f"✅ Tasks will be sent randomly every {min_mins}-{max_mins} minutes"
-    )
+    await query.edit_message_text(f"✅ Tasks every {min_mins}-{max_mins} minutes (random)")
 
-async def setinterval_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Custom interval"""
+async def setinterval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     if len(context.args) != 2:
-        await update.message.reply_text("Usage: /setinterval <min_minutes> <max_minutes>")
+        await update.message.reply_text("Usage: /setinterval <min> <max>")
         return
     
     try:
@@ -728,25 +925,20 @@ async def setinterval_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             'scheduling_enabled': True
         })
         
-        await update.message.reply_text(f"✅ Interval set: {min_mins}-{max_mins} minutes")
+        await update.message.reply_text(f"✅ Interval: {min_mins}-{max_mins} minutes")
         
     except ValueError:
-        await update.message.reply_text("Please enter numbers only")
+        await update.message.reply_text("Use numbers only!")
 
 async def avatar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    
     keyboard = [
         [InlineKeyboardButton("👨 Male", callback_data="av_gender_male"),
          InlineKeyboardButton("👩 Female", callback_data="av_gender_female")],
         [InlineKeyboardButton("⚧ Trans", callback_data="av_gender_trans")],
-        [InlineKeyboardButton("Customize Appearance", callback_data="av_custom")]
+        [InlineKeyboardButton("Customize", callback_data="av_custom")]
     ]
     
-    await update.message.reply_text(
-        "Select your dominant's gender:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("Select gender:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def av_gender_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -757,7 +949,7 @@ async def av_gender_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     name = "Master" if gender == "male" else "Mistress" if gender == "female" else "Domme"
     
     update_user(chat_id, {'avatar_gender': gender, 'avatar_name': name})
-    await query.edit_message_text(f"✅ Gender: {gender.title()}\nUse /avatar to customize.")
+    await query.edit_message_text(f"✅ {gender.title()}. Use /avatar to customize.")
 
 async def av_custom_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -786,7 +978,7 @@ async def av_custom_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await query.edit_message_text(f"Customize {gender}:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def cycle_option(update: Update, context: ContextTypes.DEFAULT_TYPE, option: str, options: list):
+async def cycle_avatar_opt(update: Update, context: ContextTypes.DEFAULT_TYPE, option: str, options: list):
     query = update.callback_query
     await query.answer()
     
@@ -801,16 +993,16 @@ async def cycle_option(update: Update, context: ContextTypes.DEFAULT_TYPE, optio
     await av_custom_callback(update, context)
 
 async def av_ethnicity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cycle_option(update, context, 'ethnicity', ETHNICITIES)
+    await cycle_avatar_opt(update, context, 'ethnicity', ETHNICITIES)
 
 async def av_body_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cycle_option(update, context, 'body', BODY_TYPES)
+    await cycle_avatar_opt(update, context, 'body', BODY_TYPES)
 
 async def av_hair_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cycle_option(update, context, 'hair_color', HAIR_COLORS)
+    await cycle_avatar_opt(update, context, 'hair_color', HAIR_COLORS)
 
 async def av_pubic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cycle_option(update, context, 'pubic', PUBIC_STYLES)
+    await cycle_avatar_opt(update, context, 'pubic', PUBIC_STYLES)
 
 async def av_feature_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -821,25 +1013,25 @@ async def av_feature_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     gender = user.get('avatar_gender', 'female')
     
     sizes = FEMALE_SIZES if gender in ['female', 'trans'] else MALE_SIZES
-    await cycle_option(update, context, 'feature_size', sizes)
+    await cycle_avatar_opt(update, context, 'feature_size', sizes)
 
 async def av_mood_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     moods = ['strict', 'playful', 'cruel', 'seductive', 'sadistic']
-    await cycle_option(update, context, 'mood', moods)
+    await cycle_avatar_opt(update, context, 'mood', moods)
 
 async def av_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("✅ Avatar saved!")
+    await query.edit_message_text("✅ Saved!")
 
-async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def risk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     keyboard = []
     for level, desc in RISK_LEVELS.items():
         keyboard.append([InlineKeyboardButton(f"{level}: {desc}", callback_data=f"risk_{level}")])
     
-    await update.message.reply_text("🔥 Set risk level:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("🔥 Set risk:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -851,14 +1043,14 @@ async def risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user(chat_id, {'risk_level': level})
     await query.edit_message_text(f"✅ Risk: {level}/5\n{RISK_LEVELS[level]}")
 
-async def creativity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def creativity_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     
     keyboard = []
-    for level, desc in CREATIVITY_LEVELS.items():
-        keyboard.append([InlineKeyboardButton(f"{level}: {desc}", callback_data=f"creativity_{level}")])
+    for level in range(1, 6):
+        keyboard.append([InlineKeyboardButton(f"{level}", callback_data=f"creativity_{level}")])
     
-    await update.message.reply_text("🎨 Set creativity:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("🎨 Creativity:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def creativity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -890,8 +1082,7 @@ async def limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("Done", callback_data="limits_done")])
     
     await update.message.reply_text(
-        "Your Limits (click to toggle):\n"
-        "⚠️ Social Media is OFF by default",
+        "Limits (click to toggle):\n⚠️ Social Media OFF by default",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -903,36 +1094,54 @@ async def toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == "limits_done":
-        await query.edit_message_text("✅ Limits updated!")
+        await query.edit_message_text("✅ Updated!")
         return
     
     kink_id = data.replace("toggle_", "")
     toggle_kink(chat_id, kink_id)
-    
-    # Refresh
     await limits(update, context)
 
-async def task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Request task now"""
+async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Request task now - bypass schedule"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
+    # Check pending
     if user.get('current_task') and not user.get('task_completed'):
         await update.message.reply_text(
-            f"You have a pending task:\n\n{user['current_task']}\n\nComplete it first!"
+            f"You have a pending task:\n\n{user['current_task']}\n\nComplete it first or use /giveup"
         )
         return
     
-    task_text = generate_location_task(user)
+    # Generate creative AI task
+    task_data = generate_creative_task(user)
     risk = user.get('risk_level', 3)
     
+    # Update user
     update_user(chat_id, {
-        'current_task': task_text,
+        'current_task': task_data['description'],
         'task_assigned_at': datetime.utcnow(),
         'task_completed': False,
         'photo_retry_count': 0
     })
     
+    # Update recent hashes
+    recent = user.get('recent_task_hashes', '')
+    hashes = recent.split(',')[-9:] if recent else []
+    hashes.append(task_data['task_hash'])
+    update_user(chat_id, {'recent_task_hashes': ','.join(hashes)})
+    
+    # Log task
+    log_task(
+        chat_id,
+        task_data['description'],
+        task_data['task_hash'],
+        task_data['risk_level'],
+        task_data['location'],
+        'assigned'
+    )
+    
+    # Send
     keyboard = [[
         InlineKeyboardButton("Complete", callback_data="complete_task"),
         InlineKeyboardButton("Give Up", callback_data="give_up")
@@ -940,24 +1149,25 @@ async def task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     name = user.get('avatar_name', 'Mistress')
     risk_emoji = "🔥" * risk
+    ai_badge = "🤖 " if task_data['ai_generated'] else ""
     
     await update.message.reply_text(
-        f"""{risk_emoji} *Task from {name}*
+        f"""{risk_emoji} {ai_badge}*Task from {name}*
 
-{task_text}
+{task_data['description']}
 
 ⏰ 30 minutes to complete.""",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     
-    asyncio.create_task(auto_expire(chat_id, 30, context))
+    asyncio.create_task(auto_expire_task(chat_id, 30, context))
 
 async def complete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text("Send photo proof of task completion.")
+    await query.message.reply_text("📸 Send selfie proof of task completion.")
 
 async def give_up_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -967,21 +1177,30 @@ async def give_up_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(chat_id)
     name = user.get('avatar_name', 'Mistress')
     
-    log_task(chat_id, user.get('current_task', ''), user.get('risk_level', 3),
-            user.get('location_type', 'home'), 'failed')
+    # Log failure
+    if user.get('current_task'):
+        log_task(
+            chat_id,
+            user['current_task'],
+            get_task_hash(user['current_task']),
+            user.get('risk_level', 3),
+            user.get('location_type', 'home'),
+            'failed'
+        )
     
     update_user(chat_id, {
         'total_tasks_failed': user['total_tasks_failed'] + 1,
         'current_streak': 0,
         'points': max(0, user['points'] - 5),
-        'current_task': None
+        'current_task': None,
+        'task_completed': False
     })
     
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(f"{name} is disappointed. Task failed.")
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle photo with PROPER AI verification"""
+    """Handle photo with ACTUAL AI vision verification"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     name = user.get('avatar_name', 'Mistress')
@@ -990,101 +1209,128 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No active task. Use /task first.")
         return
     
-    # Get photo info
+    # Download photo
     photo = update.message.photo[-1]
-    
-    # Create description of what we can see
-    photo_description = f"Photo submitted by user. File ID: {photo.file_id}, Size: {photo.width}x{photo.height}"
-    
-    await update.message.reply_text(f"{name} is analyzing your submission...")
-    
-    # Verify with AI
-    task_desc = user['current_task']
-    passed, confidence, reasoning, full_response = verify_photo_with_ai(task_desc, photo_description)
-    
-    # Get actual file for storage
     file = await context.bot.get_file(photo.file_id)
-    photo_url = file.file_path
     
-    if passed:
-        # Task completed!
-        new_completed = user['total_tasks_completed'] + 1
-        new_streak = user['current_streak'] + 1
-        new_points = user['points'] + (user.get('risk_level', 3) * 5)
-        new_nude = user.get('tasks_since_nude', 0) + 1
+    analyzing = await update.message.reply_text(f"{name} is analyzing your submission...")
+    
+    try:
+        # Download bytes
+        photo_bytes = await file.download_as_bytearray()
         
-        log_task(chat_id, task_desc, user.get('risk_level', 3),
-                user.get('location_type', 'home'), 'completed',
-                photo_url, f"AI: {confidence} - {reasoning}")
+        # ACTUAL AI verification with image
+        result = await verify_photo_with_ai(user['current_task'], photo_bytes)
         
-        update_user(chat_id, {
-            'total_tasks_completed': new_completed,
-            'current_streak': new_streak,
-            'longest_streak': max(user['longest_streak'], new_streak),
-            'points': new_points,
-            'tasks_since_nude': new_nude,
-            'current_task': None,
-            'photo_retry_count': 0
-        })
+        await analyzing.delete()
         
-        nude_msg = ""
-        if user.get('nude_reward_enabled', True) and new_nude >= user.get('nude_frequency', 3):
-            nude_msg = f"\n\n🎁 Earned nude from {name}! Use /reward"
-            update_user(chat_id, {'tasks_since_nude': 0})
-        
-        await update.message.reply_text(
-            f"""✅ *Verified by {name}*
-
-AI Verification: {confidence} confidence
-Assessment: {reasoning}
-
-Streak: {new_streak} | Points: {new_points}{nude_msg}"""
-        )
-    else:
-        # Failed verification
-        retry = user.get('photo_retry_count', 0) + 1
-        
-        if retry >= 2:
-            log_task(chat_id, task_desc, user.get('risk_level', 3),
-                    user.get('location_type', 'home'), 'failed',
-                    photo_url, f"AI Rejected: {reasoning}")
+        if result['verified']:
+            # Success!
+            new_completed = user['total_tasks_completed'] + 1
+            new_streak = user['current_streak'] + 1
+            new_points = user['points'] + (user.get('risk_level', 3) * 5)
+            new_nude = user.get('tasks_since_nude', 0) + 1
+            
+            # Log with verification details
+            log_task(
+                chat_id,
+                user['current_task'],
+                get_task_hash(user['current_task']),
+                user.get('risk_level', 3),
+                user.get('location_type', 'home'),
+                'completed',
+                file.file_path,
+                f"{result['confidence']} confidence",
+                result['full_analysis']
+            )
             
             update_user(chat_id, {
-                'total_tasks_failed': user['total_tasks_failed'] + 1,
-                'current_streak': 0,
-                'points': max(0, user['points'] - 10),
+                'total_tasks_completed': new_completed,
+                'current_streak': new_streak,
+                'longest_streak': max(user['longest_streak'], new_streak),
+                'points': new_points,
+                'tasks_since_nude': new_nude,
                 'current_task': None,
+                'task_completed': False,
                 'photo_retry_count': 0
             })
             
+            # Check nude reward
+            nude_msg = ""
+            if user.get('nude_reward_enabled', True) and new_nude >= user.get('nude_frequency', 3):
+                nude_msg = f"\n\n🎁 Earned nude from {name}! Use /reward"
+                update_user(chat_id, {'tasks_since_nude': 0})
+            
             await update.message.reply_text(
-                f"""❌ *Rejected by {name}*
+                f"""✅ *Verified by {name}*
 
-AI Assessment: {reasoning}
+AI Confidence: {result['confidence'].upper()}
+Assessment: {result['reasoning']}
+
+Streak: {new_streak} 🔥 | Points: {new_points}{nude_msg}""",
+                parse_mode='Markdown'
+            )
+            
+        else:
+            # Failed verification
+            retry = user.get('photo_retry_count', 0) + 1
+            
+            if retry >= 2:
+                # Final failure
+                log_task(
+                    chat_id,
+                    user['current_task'],
+                    get_task_hash(user['current_task']),
+                    user.get('risk_level', 3),
+                    user.get('location_type', 'home'),
+                    'failed',
+                    file.file_path,
+                    f"Rejected: {result['reasoning']}",
+                    result['full_analysis']
+                )
+                
+                update_user(chat_id, {
+                    'total_tasks_failed': user['total_tasks_failed'] + 1,
+                    'current_streak': 0,
+                    'points': max(0, user['points'] - 10),
+                    'current_task': None,
+                    'photo_retry_count': 0
+                })
+                
+                await update.message.reply_text(
+                    f"""❌ *Rejected by {name}*
+
+AI Assessment: {result['reasoning']}
 
 Failed verification twice. Task marked as failed."""
-            )
-        else:
-            update_user(chat_id, {'photo_retry_count': retry})
-            
-            keyboard = [[
-                InlineKeyboardButton("Try Again", callback_data="retry_photo"),
-                InlineKeyboardButton("Give Up", callback_data="give_up_photo")
-            ]]
-            
-            await update.message.reply_text(
-                f"""❌ *{name} rejects this photo*
+                )
+            else:
+                # Retry allowed
+                update_user(chat_id, {'photo_retry_count': retry})
+                
+                keyboard = [[
+                    InlineKeyboardButton("Try Again", callback_data="retry_photo"),
+                    InlineKeyboardButton("Give Up", callback_data="give_up_photo")
+                ]]
+                
+                await update.message.reply_text(
+                    f"""❌ *{name} rejects this photo*
 
-AI Assessment: {reasoning}
+AI Assessment: {result['reasoning']}
 
 Tries remaining: {2 - retry}""",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                
+    except Exception as e:
+        logger.error(f"Photo handling error: {e}")
+        await analyzing.delete()
+        await update.message.reply_text("Error analyzing photo. Please try again.")
 
 async def retry_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_reply_markup(reply_markup=None)
-    await update.callback_query.message.reply_text("Send a better photo that clearly shows task completion.")
+    await update.callback_query.message.reply_text("Send a clearer selfie showing task completion.")
 
 async def give_up_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -1092,19 +1338,27 @@ async def give_up_photo_callback(update: Update, context: ContextTypes.DEFAULT_T
     user = get_user(chat_id)
     name = user.get('avatar_name', 'Mistress')
     
-    log_task(chat_id, user.get('current_task', ''), user.get('risk_level', 3),
-            user.get('location_type', 'home'), 'failed')
+    if user.get('current_task'):
+        log_task(
+            chat_id,
+            user['current_task'],
+            get_task_hash(user['current_task']),
+            user.get('risk_level', 3),
+            user.get('location_type', 'home'),
+            'failed'
+        )
     
     update_user(chat_id, {
         'total_tasks_failed': user['total_tasks_failed'] + 1,
         'current_streak': 0,
-        'current_task': None
+        'current_task': None,
+        'photo_retry_count': 0
     })
     
     await update.callback_query.edit_message_reply_markup(reply_markup=None)
     await update.callback_query.message.reply_text(f"{name} is disappointed. Task failed.")
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     name = user.get('avatar_name', 'Mistress')
@@ -1121,10 +1375,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Completed: {user['total_tasks_completed']}
 Failed: {user['total_tasks_failed']}
-Streak: {user['current_streak']} (Best: {user['longest_streak']})
+Streak: {user['current_streak']} 🔥 (Best: {user['longest_streak']})
 Points: {user['points']}
 
 📍 Location: {user.get('location_type', 'home').title()}
+Details: {user.get('location_details', 'Not set')[:50]}...
 ⏱️ Interval: {min_int}-{max_int} min (random)
 🔥 Risk: {user.get('risk_level', 3)}/5
 🎨 Creativity: {user.get('creativity_level', 3)}/5
@@ -1134,7 +1389,7 @@ Points: {user['points']}
 {current}"""
     )
 
-async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     name = user.get('avatar_name', 'Mistress')
@@ -1170,10 +1425,10 @@ async def reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 [AI Image would generate]
 
-"{name} says: You've earned this. Now serve me again." """
+"{name} says: You've earned this view, pet. Now serve me again." """
         )
     else:
-        await update.message.reply_text(f"Progress: {progress}/{needed} tasks for reward")
+        await update.message.reply_text(f"Progress: {progress}/{needed} tasks for nude reward")
 
 async def resetowner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[
@@ -1220,15 +1475,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("avatar", avatar))
     app.add_handler(CommandHandler("location", location))
-    app.add_handler(CommandHandler("setdetails", setdetails_command))
+    app.add_handler(CommandHandler("setdetails", setdetails))
     app.add_handler(CommandHandler("interval", interval))
-    app.add_handler(CommandHandler("setinterval", setinterval_command))
-    app.add_handler(CommandHandler("risk", risk))
-    app.add_handler(CommandHandler("creativity", creativity))
+    app.add_handler(CommandHandler("setinterval", setinterval_cmd))
+    app.add_handler(CommandHandler("risk", risk_cmd))
+    app.add_handler(CommandHandler("creativity", creativity_cmd))
     app.add_handler(CommandHandler("limits", limits))
-    app.add_handler(CommandHandler("task", task))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("reward", reward))
+    app.add_handler(CommandHandler("task", task_cmd))
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("reward", reward_cmd))
     app.add_handler(CommandHandler("resetowner", resetowner))
     
     # Callbacks
@@ -1257,7 +1512,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(error_handler)
     
-    logger.info("DOM Bot v10.0 starting...")
+    logger.info("DOM Bot v10.2 - Fixed AI & Photo Verification")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
