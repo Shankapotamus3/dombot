@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-DOM Bot v10.4 - Conversational AI, Fixed Kinks, Real-time Updates, Easy Avatar Select
+DOM Bot v10.5 - Multi-Step Avatar with Size Modifiers
+Extremely skinny ectomorph, breast/penis size selection
 """
 
 import os
@@ -177,14 +178,14 @@ class BotParameters(Base):
     photo_retry_count = Column(Integer, default=0)
     recent_task_hashes = Column(Text, default='')
     
-    # Avatar
+    # Avatar settings
     avatar_name = Column(String, default='Mistress')
     avatar_gender = Column(String, default='female')
     avatar_ethnicity = Column(String, default='white')
     avatar_body = Column(String, default='curvy')
     avatar_pubic = Column(String, default='trimmed')
     avatar_hair_color = Column(String, default='blonde')
-    avatar_feature_size = Column(String, default='large')
+    avatar_feature_size = Column(String, default='large')  # breasts or penis
     avatar_mood = Column(String, default='strict')
     
     # Sliders
@@ -324,13 +325,11 @@ def generate_ai_response(prompt: str, max_tokens: int = 500, temperature: float 
         return None
 
 def generate_conversational_response(user: Dict, user_message: str) -> str:
-    """Generate conversational response between tasks"""
     name = user.get('avatar_name', 'Mistress')
     gender = user.get('avatar_gender', 'female')
     streak = user.get('current_streak', 0)
     points = user.get('points', 0)
     
-    # Build personality based on stats
     if streak >= 5:
         mood = "pleased and slightly seductive"
     elif streak >= 1:
@@ -451,6 +450,7 @@ Be fair - selfies are harder to pose."""
         }
 
 def generate_avatar_image(user: Dict, mood_key: str, nude: bool = False) -> Optional[bytes]:
+    """Generate avatar image with ectomorph support for slim builds"""
     try:
         gender = user.get('avatar_gender', 'female')
         ethnicity = user.get('avatar_ethnicity', 'white')
@@ -459,40 +459,96 @@ def generate_avatar_image(user: Dict, mood_key: str, nude: bool = False) -> Opti
         feature = user.get('avatar_feature_size', 'large')
         pubic = user.get('avatar_pubic', 'trimmed')
         
+        # IMPROVED body descriptions with ectomorph
+        body_descriptions = {
+            'slim': "extremely skinny ectomorph, no muscle definition, petite frame, very thin, delicate, narrow hips, flat stomach, bony, waif-like, fragile-looking, thin limbs",
+            'average': "average build, normal body fat, neither skinny nor muscular",
+            'muscular': "muscular athletic build, defined abs, toned physique, strong",
+            'curvy': "curvy voluptuous build, full hips, soft body, feminine curves"
+        }
+        
+        body_desc = body_descriptions.get(body, body_descriptions['curvy'])
+        
+        # Build physical description with size modifiers
         if gender == 'female':
-            physical = f"{ethnicity} woman, {body} build, {hair} hair, {feature} breasts"
+            breast_desc = {
+                'small': 'small petite breasts',
+                'medium': 'medium full breasts',
+                'large': 'large voluptuous breasts'
+            }.get(feature, 'medium breasts')
+            physical = f"{ethnicity} woman, {body_desc}, {hair} hair, {breast_desc}"
+            
         elif gender == 'male':
-            physical = f"{ethnicity} man, {body} build, {hair} hair, muscular"
-        else:
-            physical = f"{ethnicity} trans woman, {body} build, {hair} hair, {feature} breasts"
+            penis_desc = {
+                'small': 'small petite penis',
+                'medium': 'medium sized penis',
+                'large': 'large thick penis'
+            }.get(feature, 'medium penis')
+            physical = f"{ethnicity} man, {body_desc}, {hair} hair, {penis_desc}"
+            
+        else:  # trans
+            breast_desc = {
+                'small': 'small petite breasts',
+                'medium': 'medium full breasts',
+                'large': 'large voluptuous breasts'
+            }.get(feature, 'medium breasts')
+            penis_desc = {
+                'small': 'small petite penis',
+                'medium': 'medium sized penis',
+                'large': 'large thick penis'
+            }.get(feature, 'medium penis')
+            physical = f"{ethnicity} trans woman, {body_desc}, {hair} hair, {breast_desc}, {penis_desc}"
         
         if nude:
-            pose = "fully nude, explicit, dominant pose, confident"
-            clothing = f"{pubic} pubic hair visible"
+            pose = "fully nude, explicit, dominant pose, confident, erotic"
+            clothing = f"{pubic} pubic hair visible, completely naked"
         else:
             mood_data = AVATAR_MOODS.get(mood_key, AVATAR_MOODS['commanding'])
             pose = mood_data['desc']
             clothing = mood_data['clothing']
         
-        prompt = f"Professional photograph of dominant {physical}, {pose}, {clothing if not nude else 'fully nude, explicit content'}, high quality, detailed skin, professional lighting, 4k, dominant energy"
+        # Extra ectomorph emphasis
+        ectomorph_extra = "ectomorph body type, extremely lean, thin limbs, narrow shoulders, fragile appearance, no body fat, skinny" if body == 'slim' else ""
+        
+        prompt = f"Professional photograph of dominant {physical}, {pose}, {clothing if not nude else 'fully nude, explicit content'}, {ectomorph_extra}, high quality, detailed skin, professional lighting, 4k, dominant energy"
+        
+        logger.info(f"Image prompt: {prompt[:150]}...")
+        
+        # Negative prompt for slim builds
+        negative = ""
+        if body == 'slim':
+            negative = "muscular, bodybuilder, fat, overweight, thick, stocky, heavyset, broad shoulders, bulky, ripped"
+        
+        request_body = {
+            "model": "chroma",
+            "prompt": prompt,
+            "width": 512,
+            "height": 768 if nude else 512,
+            "seed": random.randint(1, 1000000)
+        }
+        
+        if negative:
+            request_body["negative_prompt"] = negative
         
         response = requests.post(
             VENICE_IMAGE_URL,
             headers={"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "chroma",
-                "prompt": prompt,
-                "width": 512,
-                "height": 768 if nude else 512,
-                "seed": random.randint(1, 1000000)
-            },
+            json=request_body,
             timeout=60
         )
         
         if response.status_code == 200:
-            image_data = response.json().get("images", [None])[0]
+            data = response.json()
+            image_data = data.get("images", [None])[0] if "images" in data else None
+            
             if image_data:
-                return base64.b64decode(image_data)
+                decoded = base64.b64decode(image_data)
+                logger.info(f"Image generated: {len(decoded)} bytes")
+                return decoded
+            else:
+                logger.error(f"No image in response")
+        else:
+            logger.error(f"Image API error: {response.status_code}")
         
         return None
         
@@ -553,15 +609,13 @@ def generate_creative_task(user: Dict) -> dict:
         5: "EXTREME risk - dangerous but ethical, NO unwilling participants"
     }.get(risk, "Medium")
     
-    # STRICT marking prohibition
     marking_warning = ""
     if marking_forbidden:
         marking_warning = """
 CRITICAL - MARKING IS FORBIDDEN:
 - NO writing on body with markers, pens, lipstick
 - NO drawing on skin
-- NO body writing of any kind
-- Use verbal acknowledgment or positioning instead"""
+- NO body writing of any kind"""
     
     prompt = f"""Create UNIQUE BDSM task (MAX 400 CHARS).
 
@@ -639,7 +693,6 @@ def generate_fallback_task(user: Dict, category: str = None) -> dict:
     name = user.get('avatar_name', 'Mistress')
     marking_allowed = user.get('marking', True)
     
-    # Safe fallbacks that respect kinks
     fallbacks = {
         'home': {
             1: [f"{name} commands you to kneel in your living room and photograph your submission"],
@@ -667,7 +720,6 @@ def generate_fallback_task(user: Dict, category: str = None) -> dict:
     loc_tasks = fallbacks.get(location, fallbacks['home'])
     risk_tasks = loc_tasks.get(risk, loc_tasks[3])
     
-    # Add marking task only if allowed
     if marking_allowed and category == 'degradation':
         risk_tasks = risk_tasks + [
             f"Write 'PROPERTY OF {name}' on your chest with lipstick, selfie proof"
@@ -734,20 +786,17 @@ async def random_interval_check(context: ContextTypes.DEFAULT_TYPE):
                 
                 name = u.avatar_name or 'Mistress'
                 risk_emoji = "🔥" * u.risk_level
-                ai_badge = "🤖 " if task_data['ai_generated'] else ""
                 
                 keyboard = [[
                     InlineKeyboardButton("Complete", callback_data="complete_task"),
                     InlineKeyboardButton("Give Up", callback_data="give_up")
                 ]]
                 
-                message_text = f"""{risk_emoji} {ai_badge}*Task from {name}*
+                message_text = f"""{risk_emoji} *Task from {name}*
 
 {task_data['description']}
 
-⏰ Complete within 30 minutes.
-
-Next task in approximately {random_minutes} minutes."""
+⏰ Complete within 30 minutes."""
                 
                 avatar_chance = u.avatar_frequency or 0.3
                 send_avatar = random.random() < avatar_chance
@@ -833,110 +882,181 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(chat_id, update.effective_user.username)
     
     await update.message.reply_text(
-        f"""Welcome to DOM Bot v10.4
+        f"""Welcome to DOM Bot v10.5
 
 Your Chat ID: `{chat_id}`
 
-🎭 */avatar* - Select avatar (quick list)
+🎭 */avatar* - Multi-step avatar creation (gender → size → features)
 📍 */location* - Set location
 ⏱️ */interval* - Random task interval
 🔥 */risk* - Risk level
 🎨 */creativity* - Creativity
 🖼️ */avatarfreq* - Avatar frequency
-🚫 */limits* - Kink toggles (real-time updates)
+🚫 */limits* - Kink toggles
 📋 */task* - Get task NOW
-💬 *Just message me* - I'll converse with you
+💬 *Just message me* - I'll converse
 📊 */status* - Stats
 🎁 */reward* - Nude rewards
 
-NEW: I now chat with you between tasks!"""
+NEW: Extreme ectomorph slim bodies + size selection!"""
     )
+
+# ==================== MULTI-STEP AVATAR ====================
 
 async def avatar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick avatar selection with list"""
-    chat_id = update.effective_chat.id
-    user = get_user(chat_id)
-    
-    # Show current
-    current = f"Current: {user.get('avatar_gender', 'female')} {user.get('avatar_ethnicity', 'white')} {user.get('avatar_body', 'curvy')}"
-    
-    # Build selection keyboard
-    keyboard = [
-        [InlineKeyboardButton("👨 Male", callback_data="quick_male"),
-         InlineKeyboardButton("👩 Female", callback_data="quick_female"),
-         InlineKeyboardButton("⚧ Trans", callback_data="quick_trans")],
-        [InlineKeyboardButton("--- Ethnicity ---", callback_data="noop")],
-        [InlineKeyboardButton("White", callback_data="quick_eth_white"),
-         InlineKeyboardButton("Black", callback_data="quick_eth_black")],
-        [InlineKeyboardButton("Asian", callback_data="quick_eth_asian"),
-         InlineKeyboardButton("Hispanic", callback_data="quick_eth_hispanic")],
-        [InlineKeyboardButton("--- Body Type ---", callback_data="noop")],
-        [InlineKeyboardButton("Slim", callback_data="quick_body_slim"),
-         InlineKeyboardButton("Average", callback_data="quick_body_average")],
-        [InlineKeyboardButton("Muscular", callback_data="quick_body_muscular"),
-         InlineKeyboardButton("Curvy", callback_data="quick_body_curvy")],
-        [InlineKeyboardButton("--- Hair ---", callback_data="noop")],
-        [InlineKeyboardButton("Blonde", callback_data="quick_hair_blonde"),
-         InlineKeyboardButton("Brown", callback_data="quick_hair_brown")],
-        [InlineKeyboardButton("Red", callback_data="quick_hair_red"),
-         InlineKeyboardButton("Black", callback_data="quick_hair_black")],
-        [InlineKeyboardButton("Done", callback_data="quick_done")]
-    ]
-    
+    """Step 1: Select Gender"""
     await update.message.reply_text(
-        f"""🎭 *Avatar Selection*
-
-{current}
-
-Click to set each option, then Done:""",
+        "🎭 *Step 1: Select Gender*",
         parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👨 Male", callback_data="av_step1_male")],
+            [InlineKeyboardButton("👩 Female", callback_data="av_step1_female")],
+            [InlineKeyboardButton("⚧ Trans", callback_data="av_step1_trans")]
+        ])
     )
 
-async def quick_avatar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle quick avatar selection"""
+async def avatar_step_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle multi-step avatar creation"""
     query = update.callback_query
     await query.answer()
     
     chat_id = update.effective_chat.id
-    data = query.data
+    data = query.data.replace("av_", "")
     
-    if data == "noop":
-        return
-    
-    if data == "quick_done":
-        user = get_user(chat_id)
-        gender = user.get('avatar_gender', 'female')
+    # Step 1: Gender selected
+    if data.startswith("step1_"):
+        gender = data.replace("step1_", "")
+        update_user(chat_id, {'avatar_gender': gender})
+        
+        # Set default name
         name = "Master" if gender == "male" else "Mistress" if gender == "female" else "Domme"
         update_user(chat_id, {'avatar_name': name})
-        await query.edit_message_text(
-            f"✅ Avatar set!\n\n"
-            f"Gender: {gender}\n"
-            f"Ethnicity: {user.get('avatar_ethnicity', 'white')}\n"
-            f"Body: {user.get('avatar_body', 'curvy')}\n"
-            f"Hair: {user.get('avatar_hair_color', 'blonde')}\n\n"
-            f"Use /avatar to change anytime."
-        )
-        return
-    
-    # Extract setting
-    if data.startswith("quick_"):
-        parts = data.replace("quick_", "").split("_")
-        if len(parts) == 2:
-            category, value = parts
-            if category == "eth":
-                update_user(chat_id, {'avatar_ethnicity': value})
-            elif category == "body":
-                update_user(chat_id, {'avatar_body': value})
-            elif category == "hair":
-                update_user(chat_id, {'avatar_hair_color': value})
-        else:
-            # Gender
-            gender = parts[0]
-            update_user(chat_id, {'avatar_gender': gender})
         
-        # Refresh menu
-        await avatar(update, context)
+        # Step 2: Size selection based on gender
+        if gender == 'female':
+            await query.edit_message_text(
+                "👩 *Female selected*\n\nStep 2: Select breast size",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🍒 Small", callback_data="av_step2_breasts_small"),
+                     InlineKeyboardButton("🍊 Medium", callback_data="av_step2_breasts_medium"),
+                     InlineKeyboardButton("🍈 Large", callback_data="av_step2_breasts_large")]
+                ])
+            )
+        elif gender == 'male':
+            await query.edit_message_text(
+                "👨 *Male selected*\n\nStep 2: Select penis size",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Small", callback_data="av_step2_penis_small"),
+                     InlineKeyboardButton("Medium", callback_data="av_step2_penis_medium"),
+                     InlineKeyboardButton("Large", callback_data="av_step2_penis_large")]
+                ])
+            )
+        else:  # trans
+            await query.edit_message_text(
+                "⚧ *Trans selected*\n\nStep 2: Select size",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Small breasts & penis", callback_data="av_step2_trans_small"),
+                     InlineKeyboardButton("Medium breasts & penis", callback_data="av_step2_trans_medium"),
+                     InlineKeyboardButton("Large breasts & penis", callback_data="av_step2_trans_large")]
+                ])
+            )
+    
+    # Step 2: Size selected
+    elif data.startswith("step2_"):
+        size_part = data.replace("step2_", "")
+        
+        if size_part.startswith("breasts_"):
+            size = size_part.replace("breasts_", "")
+            update_user(chat_id, {'avatar_feature_size': size})
+        elif size_part.startswith("penis_"):
+            size = size_part.replace("penis_", "")
+            update_user(chat_id, {'avatar_feature_size': size})
+        elif size_part.startswith("trans_"):
+            size = size_part.replace("trans_", "")
+            update_user(chat_id, {'avatar_feature_size': size})
+        
+        # Step 3: Ethnicity
+        await query.edit_message_text(
+            "✅ Size saved\n\nStep 3: Select ethnicity",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("White", callback_data="av_step3_white"),
+                 InlineKeyboardButton("Black", callback_data="av_step3_black")],
+                [InlineKeyboardButton("Asian", callback_data="av_step3_asian"),
+                 InlineKeyboardButton("Hispanic", callback_data="av_step3_hispanic")]
+            ])
+        )
+    
+    # Step 3: Ethnicity selected
+    elif data.startswith("step3_"):
+        ethnicity = data.replace("step3_", "")
+        update_user(chat_id, {'avatar_ethnicity': ethnicity})
+        
+        # Step 4: Body type (with ectomorph emphasis)
+        await query.edit_message_text(
+            "✅ Ethnicity saved\n\nStep 4: Select body type",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Slim (ectomorph, extremely skinny)", callback_data="av_step4_slim")],
+                [InlineKeyboardButton("Average", callback_data="av_step4_average")],
+                [InlineKeyboardButton("Muscular", callback_data="av_step4_muscular")],
+                [InlineKeyboardButton("Curvy", callback_data="av_step4_curvy")]
+            ])
+        )
+    
+    # Step 4: Body selected
+    elif data.startswith("step4_"):
+        body = data.replace("step4_", "")
+        update_user(chat_id, {'avatar_body': body})
+        
+        # Step 5: Hair color
+        await query.edit_message_text(
+            "✅ Body saved\n\nStep 5: Select hair color",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Blonde", callback_data="av_step5_blonde"),
+                 InlineKeyboardButton("Brown", callback_data="av_step5_brown")],
+                [InlineKeyboardButton("Red", callback_data="av_step5_red"),
+                 InlineKeyboardButton("Black", callback_data="av_step5_black")],
+                [InlineKeyboardButton("White", callback_data="av_step5_white"),
+                 InlineKeyboardButton("Bald", callback_data="av_step5_bald")]
+            ])
+        )
+    
+    # Step 5: Hair selected - DONE
+    elif data.startswith("step5_"):
+        hair = data.replace("step5_", "")
+        update_user(chat_id, {'avatar_hair_color': hair})
+        
+        # Show summary
+        user = get_user(chat_id)
+        gender = user.get('avatar_gender', 'female')
+        size = user.get('avatar_feature_size', 'large')
+        ethnicity = user.get('avatar_ethnicity', 'white')
+        body = user.get('avatar_body', 'curvy')
+        hair = user.get('avatar_hair_color', 'blonde')
+        name = user.get('avatar_name', 'Mistress')
+        
+        size_desc = ""
+        if gender == 'female':
+            size_desc = f"{size} breasts"
+        elif gender == 'male':
+            size_desc = f"{size} penis"
+        else:
+            size_desc = f"{size} breasts & penis"
+        
+        await query.edit_message_text(
+            f"""✅ *Avatar Complete!*
+
+{name} is:
+• Gender: {gender}
+• Size: {size_desc}
+• Ethnicity: {ethnicity}
+• Body: {body} (ectomorph if slim)
+• Hair: {hair}
+
+Use /avatar to change anytime."""
+        )
 
 async def avatarfreq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1074,73 +1194,51 @@ async def creativity_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(f"✅ Creativity: {level}/5")
 
 async def limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show kink limits with real-time updates"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
-    # Build keyboard with current states
     keyboard = []
     row = []
-    
     for kink_id, kink_name in KINK_CATEGORIES.items():
         enabled = user.get(kink_id, True)
         emoji = "✅" if enabled else "❌"
-        row.append(InlineKeyboardButton(
-            f"{emoji} {kink_name}", 
-            callback_data=f"toggle_{kink_id}"
-        ))
+        row.append(InlineKeyboardButton(f"{emoji} {kink_name}", callback_data=f"toggle_{kink_id}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    
     keyboard.append([InlineKeyboardButton("Done", callback_data="limits_done")])
     
-    await update.message.reply_text(
-        "Your Limits (click to toggle - updates instantly):",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("Your Limits (click to toggle):", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle kink toggle with REAL-TIME menu refresh"""
     query = update.callback_query
     await query.answer()
-    
     chat_id = update.effective_chat.id
     data = query.data
     
     if data == "limits_done":
-        await query.edit_message_text("✅ Limits updated!")
+        await query.edit_message_text("✅ Updated!")
         return
     
-    # Toggle the kink
     kink_id = data.replace("toggle_", "")
-    new_val = toggle_kink(chat_id, kink_id)
+    toggle_kink(chat_id, kink_id)
     
-    # Get updated user state
     user = get_user(chat_id)
-    
-    # REBUILD keyboard with new states (real-time update)
     keyboard = []
     row = []
-    
     for kid, kname in KINK_CATEGORIES.items():
         enabled = user.get(kid, True)
         emoji = "✅" if enabled else "❌"
-        row.append(InlineKeyboardButton(
-            f"{emoji} {kname}", 
-            callback_data=f"toggle_{kid}"
-        ))
+        row.append(InlineKeyboardButton(f"{emoji} {kname}", callback_data=f"toggle_{kid}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
     if row:
         keyboard.append(row)
-    
     keyboard.append([InlineKeyboardButton("Done", callback_data="limits_done")])
     
-    # Update the message with new keyboard
     await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1382,30 +1480,37 @@ async def reward_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if progress >= needed:
         await update.message.reply_text(f"🎁 Generating nude reward from {name}...")
         
-        image_bytes = generate_avatar_image(user, 'seductive', nude=True)
-        
-        if image_bytes:
-            caption = f"""🎁 *Nude Reward from {name}*
+        try:
+            image_bytes = generate_avatar_image(user, 'seductive', nude=True)
+            
+            if image_bytes and len(image_bytes) > 1000:
+                caption = f"""🎁 *Nude Reward from {name}*
 
 "{name} says: You've been a good pet. Enjoy this view... then get back to serving me."
 
 Next reward in {needed} tasks."""
-            
-            await update.message.reply_photo(
-                photo=InputFile(io.BytesIO(image_bytes), filename="reward.jpg"),
-                caption=caption,
-                parse_mode='Markdown'
-            )
-        else:
-            await update.message.reply_text(
-                f"""🎁 *Nude Reward from {name}*
+                
+                await update.message.reply_photo(
+                    photo=InputFile(io.BytesIO(image_bytes), filename="reward.jpg"),
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+                
+                update_user(chat_id, {'tasks_since_nude': 0})
+            else:
+                await update.message.reply_text(
+                    f"""🎁 *Nude Reward from {name}*
 
 [Image generation failed]
 
 "{name} says: You've earned this reward, pet. Now serve me again." """
-            )
-        
-        update_user(chat_id, {'tasks_since_nude': 0})
+                )
+                update_user(chat_id, {'tasks_since_nude': 0})
+                
+        except Exception as e:
+            logger.error(f"Reward error: {e}")
+            await update.message.reply_text("Error generating reward. Try again later.")
+            update_user(chat_id, {'tasks_since_nude': 0})
     else:
         await update.message.reply_text(
             f"🎁 Progress: {progress}/{needed} tasks for nude reward\nKeep being obedient! 🔥"
@@ -1461,28 +1566,20 @@ async def cancel_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.edit_message_text("Cancelled.")
 
-# ==================== CONVERSATIONAL HANDLER ====================
-
 async def conversation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle non-command messages - conversational AI between tasks"""
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
     
-    # Don't respond if there's an active task (they should be submitting photo)
     if user.get('current_task') and not user.get('task_completed'):
-        # Check if they might be trying to complete
         if update.message.text and any(word in update.message.text.lower() for word in ['done', 'completed', 'finished', 'did it']):
             await update.message.reply_text("Send a photo to prove completion, or use /giveup")
             return
-        # Otherwise remind them
         await update.message.reply_text("You have a pending task. Complete it or use /giveup")
         return
     
-    # Generate conversational response
     user_message = update.message.text or ""
     response = generate_conversational_response(user, user_message)
     
-    # Occasionally send with avatar image (20% chance in conversation)
     if random.random() < 0.2:
         mood = random.choice(['pleased', 'commanding', 'thoughtful'])
         image_bytes = generate_avatar_image(user, mood, nude=False)
@@ -1509,7 +1606,6 @@ def main():
     
     app = Application.builder().token(token).build()
     
-    # Scheduler
     job_queue = app.job_queue
     job_queue.run_repeating(random_interval_check, interval=60, first=10)
     
@@ -1530,7 +1626,7 @@ def main():
     app.add_handler(CommandHandler("resetowner", resetowner))
     
     # Callbacks
-    app.add_handler(CallbackQueryHandler(quick_avatar_callback, pattern="^quick_"))
+    app.add_handler(CallbackQueryHandler(avatar_step_callback, pattern="^av_"))
     app.add_handler(CallbackQueryHandler(loc_callback, pattern="^loc_"))
     app.add_handler(CallbackQueryHandler(interval_callback, pattern="^int_"))
     app.add_handler(CallbackQueryHandler(risk_callback, pattern="^risk_"))
@@ -1543,12 +1639,12 @@ def main():
     app.add_handler(CallbackQueryHandler(confirm_reset, pattern="^confirm_reset$"))
     app.add_handler(CallbackQueryHandler(cancel_reset, pattern="^cancel_reset$"))
     
-    # Messages - IMPORTANT: conversation handler for non-command text
+    # Messages
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler))
     app.add_error_handler(error_handler)
     
-    logger.info("DOM Bot v10.4 - Conversational AI, Fixed Kinks, Real-time Updates")
+    logger.info("DOM Bot v10.5 - Multi-step avatar with size modifiers")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
