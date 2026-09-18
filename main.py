@@ -24,7 +24,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, desc
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, Text, Float, desc
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import requests
