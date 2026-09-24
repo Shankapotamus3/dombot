@@ -291,13 +291,25 @@ def get_kink_display(kink_key, level):
     emoji = KINK_LEVELS[level]["emoji"]
     return f"{emoji} {name}"
 
-async def generate_ai_response(prompt, temperature=0.8):
+async def generate_ai_response(prompt, temperature=0.9):
+    """Conversational dominant AI response"""
     try:
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
         data = {
             "model": "claude-opus-4-8-fast",
             "messages": [
-                {"role": "system", "content": "You are a dominant AI creating BDSM tasks. Be creative and demanding. No time durations - single actions proven by photo only."},
+                {"role": "system", "content": """You are a playful but demanding Domme. You speak with confidence, occasional teasing, and personality. 
+                
+                Rules:
+                - Be conversational, not robotic
+                - Use occasional pet names (pet, toy, slut, good girl/boy)
+                - Mix encouragement with demands
+                - React to their specific situation (location, outfit, etc.)
+                - Be creative and specific
+                - No time durations - single actions only
+                - End with a teasing challenge or question sometimes
+                
+                Example tones: "Mmm, I see you're at work... naughty. Here's what I want.", "Oh pet, you're going to look so pretty doing this.", "That's a good toy. Now..."""},
                 {"role": "user", "content": prompt}
             ],
             "temperature": temperature,
@@ -313,15 +325,32 @@ async def generate_ai_response(prompt, temperature=0.8):
         return None
 
 async def analyze_image(image_bytes, task_desc):
+    """Lenient photo verification"""
     try:
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # More lenient prompt allowing for selfie angles and equivalent items
+        prompt = f"""Task: {task_desc}
+
+Verify this photo. Be REASONABLE about:
+- Selfie angles (can't see own face/back in selfie)
+- Lighting and shadows
+- Equivalent items (any clamp = clothespin, any tie = rope, etc.)
+- Partial completion if task is complex
+
+Does this show the task is completed? Reply:
+VERIFIED: yes/no
+REASON: brief explanation
+
+Be lenient - if effort was made and task is reasonably attempted, verify yes."""
+        
         data = {
             "model": "claude-opus-4-8-fast",
             "messages": [{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Task: {task_desc}\n\nDoes this photo show completion? Reply VERIFIED: yes/no REASON: brief"},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
                 ]
             }],
@@ -341,7 +370,7 @@ def parse_verification(response):
     return verified, reason
 
 async def generate_task_text(user, session=None):
-    """AI generates task with weighted kink selection for variety"""
+    """AI generates task with strict kink filtering"""
     outfit_items = json.loads(user.outfit_items or '[]')
     gender = user.gender or "nonbinary"
     base_risk = user.risk_level or 1
@@ -363,9 +392,16 @@ async def generate_task_text(user, session=None):
     body_parts = ", ".join(guide["body_parts"])
     cannot = ", ".join(guide.get("cannot", [])) if guide.get("cannot") else "none"
     
-    # Get kinks by level
+    # Get kinks by level - STRICT: only "yes" and "okay", never "no"
     yes_kinks = get_user_kinks(user, "yes")
     okay_kinks = get_user_kinks(user, "okay")
+    
+    # STRICT ENFORCEMENT: Build list of forbidden activities from "no" kinks
+    forbidden_kinks = []
+    for k in KINK_CATEGORIES.keys():
+        if getattr(user, k, "no") == "no":
+            forbidden_kinks.append(k.replace("kink_", ""))
+    
     all_allowed = yes_kinks + okay_kinks
     
     if not all_allowed:
@@ -399,6 +435,7 @@ async def generate_task_text(user, session=None):
     yes_text = f"\nDESIRED KINKS (high priority): {', '.join(yes_kinks)}" if yes_kinks else ""
     selected_text = f"\nSELECTED FOR THIS TASK: {', '.join(selected_kinks)}"
     okay_text = f"\nAlso allowed: {', '.join(okay_kinks)}" if okay_kinks and len(okay_kinks) <= 5 else ""
+    forbidden_text = f"\n\nFORBIDDEN (NEVER USE): {', '.join(forbidden_kinks)}" if forbidden_kinks else ""
     
     prompt = f"""Generate ONE creative BDSM task for a {gender} submissive.
 
@@ -409,7 +446,7 @@ RISK LEVEL: {effective_risk}/5
 OUTFIT: {user.current_outfit}
 CLOTHING AVAILABLE: {items_text}
 BODY PARTS AVAILABLE: {body_parts}
-NEVER USE: {cannot}{yes_text}{selected_text}{okay_text}
+NEVER USE: {cannot}{yes_text}{selected_text}{okay_text}{forbidden_text}
 
 CRITICAL RULES:
 - Task MUST be completable at: {location}
@@ -421,6 +458,7 @@ CRITICAL RULES:
 - Never involve non-consenting people
 - Focus on SELECTED kinks, especially DESIRED ones
 - Be creative - avoid repetitive tasks
+- ABSOLUTELY NEVER use FORBIDDEN kinks
 
 Generate specific task:"""
     
@@ -429,12 +467,26 @@ Generate specific task:"""
     if response:
         response = response.strip()
         
+        # STRICT POST-FILTER: Check against forbidden kinks
+        forbidden_keywords = {
+            "marking": ["write", "marker", "sharpie", "draw on", "body writing", "written", "writing", "pen on", "words on", "label yourself"],
+            "watersports": ["pee", "piss", "urine", "wet yourself", "puddle"],
+            "pain": ["hard slap", "punch", "kick", "bruise", "bleed"],
+            "breathplay": ["choke", "strangle", "suffocate", "hold breath", "bag over"],
+            "social_media": ["post", "upload", "instagram", "twitter", "facebook", "send to", "share online"]
+        }
+        
+        for forbidden_kink, keywords in forbidden_keywords.items():
+            if forbidden_kink in forbidden_kinks:
+                if any(kw in response.lower() for kw in keywords):
+                    logger.warning(f"Filtered task containing forbidden kink '{forbidden_kink}': {response[:100]}")
+                    # Retry with stricter prompt
+                    return await generate_task_text(user, session)
+        
         # Anti-repetition filter
         repetitive_tasks = ["shoelace", "clothespin", "clothes pin", "shoe lace"]
         if any(w in response.lower() for w in repetitive_tasks):
-            # Check if pain/bondage is actually selected
-            if not any(k in selected_kinks for k in ["pain", "bondage", "cbt"]):
-                # Retry if using repetitive elements without relevant kinks
+            if not any(k in selected_kinks for k in ["pain", "bondage", "cbt", "nipple"]):
                 return await generate_task_text(user, session)
         
         return response
@@ -996,7 +1048,7 @@ async def kink_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         session.close()
 
 async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set specific kink level - FIXED VERSION"""
+    """Set specific kink level"""
     query = update.callback_query
     await query.answer()
     
@@ -1150,6 +1202,7 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['awaiting_interval'] = False
 
 async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Conversational task delivery"""
     user_id = update.effective_user.id
     session = get_session()
     try:
@@ -1170,19 +1223,32 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         active = session.query(Task).filter_by(user_id=user_id, status="pending").first()
         if active:
             time_left = (active.expires_at - datetime.now(timezone.utc)).total_seconds() / 60
-            await update.message.reply_text(f"Active task!\n\n{active.task_text[:200]}...\n\nTime: {max(0, time_left):.0f} min left")
+            await update.message.reply_text(f"You already have a task, pet!\n\n{active.task_text[:200]}...\n\n⏰ {max(0, time_left):.0f} minutes left. Get to it.")
             return
         
-        await update.message.reply_text("🤖 AI generating custom task...")
+        # Send "thinking" message with personality
+        thinking_messages = [
+            "Mmm, let me think about what I want from you today...",
+            "Oh, this should be fun. Give me a moment, toy...",
+            "Planning something delicious for you...",
+            "Let's see... what would amuse me right now..."
+        ]
+        await update.message.reply_text(random.choice(thinking_messages))
         
         # 30% chance to send a dominant avatar image first
         if random.random() < 0.3 and user.avatar_gender:
             avatar_url = await generate_avatar_pose(user, "dominant")
             if avatar_url:
+                dom_captions = [
+                    "Look at me while you do this...",
+                    "I'm watching, pet. Don't disappoint me.",
+                    "This is what you're serving today.",
+                    "Get inspired, toy."
+                ]
                 await context.bot.send_photo(
                     chat_id=user_id,
                     photo=avatar_url,
-                    caption="🔥 Your Mistress has a task for you..."
+                    caption=random.choice(dom_captions)
                 )
                 await asyncio.sleep(1)
         
@@ -1212,18 +1278,26 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         effective = min(5, effective)
         
         keyboard = [
-            [InlineKeyboardButton("📸 Send Photo", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{task.id}")]
+            [InlineKeyboardButton("📸 Done, Mistress", callback_data=f"complete_{task.id}")],
+            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")]
         ]
         
         loc = user.custom_location or user.location
         
+        # Conversational task delivery
+        risk_names = {1: "gentle", 2: "teasing", 3: "risky", 4: "dangerous", 5: "exposed"}
+        risk_flair = risk_names.get(effective, "interesting")
+        
+        openings = [
+            f"Ah, you're at {loc} wearing {user.current_outfit}... *smirks*\n\n{task_text}\n\nYou have 30 minutes, pet. Impress me.",
+            f"Ooh, {loc} with {others} around? How... {risk_flair}.\n\n{task_text}\n\n30 minutes. Don't keep me waiting.",
+            f"*looks you up and down*\n\nAt {loc} like that? Perfect.\n\n{task_text}\n\n30 minutes. Show me what a good toy you are.",
+            f"Mmm, I like this scenario. {loc}, {user.current_outfit}, {others} present...\n\n{task_text}\n\n30 minutes. Make me proud, slut.",
+            f"Oh this is going to be fun. You're at {loc} and I'm feeling... inspired.\n\n{task_text}\n\n30 minutes. Go."
+        ]
+        
         await update.message.reply_text(
-            f"🎯 TASK (Risk {user.risk_level}, Effective {effective})\n\n"
-            f"📍 {loc}\n"
-            f"👔 {user.current_outfit}\n\n"
-            f"{task_text}\n\n"
-            f"Complete and send photo. 30 minutes.",
+            random.choice(openings),
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     finally:
@@ -1292,29 +1366,30 @@ async def rewards_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ PHOTO HANDLING ============
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Conversational photo handling"""
     user_id = update.effective_user.id
     session = get_session()
     try:
         task = session.query(Task).filter_by(user_id=user_id, status="pending").first()
         if not task:
-            await update.message.reply_text("No active task. Use /task.")
+            await update.message.reply_text("No active task, pet. Use /task if you're eager for attention.")
             return
         
         now = datetime.now(timezone.utc)
         if now > task.expires_at:
             task.status = "expired"
             session.commit()
-            await update.message.reply_text("⏰ Task expired. Use /task.")
+            await update.message.reply_text("⏰ Too slow, toy. Task expired. Try again with /task")
             return
         
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
-        await update.message.reply_text("📸 AI analyzing...")
+        await update.message.reply_text("Mmm, let me see what you've done...")
         photo_bytes = await file.download_as_bytearray()
         
         if len(photo_bytes) < 1000:
-            await update.message.reply_text("Photo too small. Send clearer photo.")
+            await update.message.reply_text("Photo's too small, pet. Send something I can actually see.")
             return
         
         verification = await analyze_image(photo_bytes, task.task_text)
@@ -1333,6 +1408,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.challenges_since_reward += 1
             session.commit()
             
+            # Conversational success responses
+            success_responses = [
+                f"✅ Good toy! +{10 * task.risk_level} points\nStreak: {user.streak}\n\nYou please me. For now.",
+                f"✅ Mmm, very nice. +{10 * task.risk_level} points\nStreak: {user.streak}\n\nKeep this up and I might start liking you.",
+                f"✅ Well done, pet. +{10 * task.risk_level} points\nStreak: {user.streak}\n\nI'm almost impressed.",
+                f"✅ Oh, you actually did it? +{10 * task.risk_level} points\nStreak: {user.streak}\n\nColor me surprised.",
+                f"✅ There's my good {user.gender or 'pet'}. +{10 * task.risk_level} points\nStreak: {user.streak}\n\nReady for more?"
+            ]
+            
             # Check if reward threshold reached (random between 5-10)
             reward_threshold = random.randint(5, 10)
             
@@ -1342,28 +1426,30 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 session.commit()
                 
                 await update.message.reply_text(
-                    f"✅ COMPLETED!\n\n+{10 * task.risk_level} points\n"
-                    f"Streak: {user.streak}\n\n"
-                    f"🎁 REWARD UNLOCKED! Generating your prize..."
+                    random.choice(success_responses) + "\n\n🎁 You've earned a reward... let me show you something special."
                 )
                 
                 # Generate and send nude reward
                 reward_url = await generate_avatar_pose(user, "reward")
                 if reward_url:
+                    reward_captions = [
+                        f"🎁 This is what you work for, pet.\n\n{user.streak} streak. Keep it up.",
+                        f"🎁 Your reward for being such a good toy.\n\nWant more? Complete more tasks.",
+                        f"🎁 Mmm, look what you've earned...\n\n{user.completed_tasks} tasks complete. I'm proud.",
+                        f"🎁 This body is your motivation, slut.\n\nKeep serving me."
+                    ]
                     await context.bot.send_photo(
                         chat_id=user_id,
                         photo=reward_url,
-                        caption=f"🎁 REWARD for {user.streak} streak!\n\nYou've completed {user.completed_tasks} tasks. Your avatar celebrates with you..."
+                        caption=random.choice(reward_captions)
                     )
                 else:
-                    await update.message.reply_text("🎁 REWARD earned! (Image generation failed, but points stand)")
+                    await update.message.reply_text("🎁 Reward earned! (Image failed but you still get the points, pet)")
             else:
                 progress = user.challenges_since_reward
                 remaining = reward_threshold - progress
                 await update.message.reply_text(
-                    f"✅ COMPLETED!\n\n+{10 * task.risk_level} points\n"
-                    f"Streak: {user.streak}\n"
-                    f"Progress to reward: {progress}/{reward_threshold} ({remaining} more)"
+                    random.choice(success_responses) + f"\n\n{remaining} more until your next reward..."
                 )
         else:
             if task.verification_attempts >= 2:
@@ -1371,21 +1457,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user = session.query(UserState).filter_by(user_id=user_id).first()
                 user.consecutive_failures += 1
                 session.commit()
-                await update.message.reply_text(f"❌ FAILED\n\nReason: {reason}\nNo retries. Use /task.")
+                
+                fail_responses = [
+                    f"❌ Failed.\n\nReason: {reason}\n\nNo more chances, toy. Use /task to try again.",
+                    f"❌ Not good enough.\n\n{reason}\n\nI'm disappointed. /task for another chance.",
+                    f"❌ You failed me.\n\n{reason}\n\nDon't let it happen again. /task",
+                    f"❌ Unacceptable.\n\n{reason}\n\nTry harder next time. /task"
+                ]
+                await update.message.reply_text(random.choice(fail_responses))
             else:
                 keyboard = [
                     [InlineKeyboardButton("🔄 Try Again", callback_data=f"retry_{task.id}")],
                     [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{task.id}")]
                 ]
+                
+                retry_responses = [
+                    f"❌ Not quite, pet.\n\n{reason}\n\n{2 - task.verification_attempts} try left. Do better.",
+                    f"❌ Mmm, no.\n\n{reason}\n\nYou have {2 - task.verification_attempts} more chance. Impress me.",
+                    f"❌ That's not what I asked for.\n\n{reason}\n\n{2 - task.verification_attempts} attempt remaining."
+                ]
                 await update.message.reply_text(
-                    f"❌ Rejected: {reason}\n\n{2 - task.verification_attempts} retry left.",
+                    random.choice(retry_responses),
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
         
         session.commit()
     except Exception as e:
         logger.error(f"Photo error: {e}")
-        await update.message.reply_text("Error processing photo. Try again.")
+        await update.message.reply_text("Something went wrong, pet. Try again.")
     finally:
         session.close()
 
