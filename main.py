@@ -1020,13 +1020,42 @@ async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Brief pause then show menu again
             await asyncio.sleep(0.5)
-            await kinks_cmd(update, context)
+            await kinks_back_callback(update, context)
     finally:
         session.close()
 
 async def kinks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return to kinks menu"""
-    await kinks_cmd(update, context)
+    """Return to kinks menu - FIXED VERSION"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        if not user:
+            await query.edit_message_text("Use /start first")
+            return
+        
+        # Build keyboard with current states
+        keyboard = []
+        for kink_key, (name, desc) in KINK_CATEGORIES.items():
+            current_level = getattr(user, kink_key, "no")
+            emoji = KINK_LEVELS[current_level]["emoji"]
+            keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"kinkmenu_{kink_key}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Done", callback_data="kinks_done")])
+        
+        await query.edit_message_text(
+            "🎭 Kink Preferences\n\n"
+            "❌ = No (hard limit)\n"
+            "⭕ = Okay (Dom may use)\n"
+            "✅ = Yes (desired/favorite)\n\n"
+            "Tap a kink to cycle through options:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    finally:
+        session.close()
 
 async def kinks_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
