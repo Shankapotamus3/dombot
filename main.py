@@ -61,7 +61,7 @@ class UserState(Base):
     avatar_gender = Column(String(20), default=None)
     avatar_race = Column(String(20), default=None)
     avatar_build = Column(String(20), default=None)
-    avatar_hair = Column(20), default=None)
+    avatar_hair = Column(String(20), default=None)
     avatar_genital_size = Column(String(20), default=None)
     # Reward tracking
     challenges_since_reward = Column(Integer, default=0)
