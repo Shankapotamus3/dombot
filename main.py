@@ -1507,13 +1507,20 @@ def main():
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    scheduler.add_job(
-        lambda: asyncio.create_task(random_interval_check(application)),
-        IntervalTrigger(minutes=1),
-        id="interval_check",
-        replace_existing=True
-    )
+    # FIX: Use application.job_queue instead of apscheduler directly
+    # Or wrap the call properly
     
+    async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
+        await random_interval_check(context.application)
+    
+    # Add to job_queue instead of using apscheduler directly
+    application.job_queue.run_repeating(
+        scheduled_check,
+        interval=60,  # 60 seconds
+        first=10,  # Start after 10 seconds
+        name="interval_check"
+    )
+        
     # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("gender", gender_cmd))
