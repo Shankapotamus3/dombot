@@ -996,11 +996,12 @@ async def kink_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         session.close()
 
 async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set specific kink level"""
+    """Set specific kink level - FIXED VERSION"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data.replace("kinkset_", "").split("_")
+    # FIX: Use rsplit to handle underscores in kink names
+    data = query.data.replace("kinkset_", "").rsplit("_", 1)
     kink_key = data[0]
     level = data[1]
     user_id = update.effective_user.id
@@ -1025,7 +1026,7 @@ async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def kinks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return to kinks menu - FIXED VERSION"""
+    """Return to kinks menu"""
     query = update.callback_query
     await query.answer()
     
