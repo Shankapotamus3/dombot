@@ -5,6 +5,7 @@ import asyncio
 import base64
 import random
 import requests
+from io import BytesIO
 from datetime import datetime, timezone, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,8 +16,6 @@ from telegram.ext import (
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, DateTime, Boolean, Text, desc
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
 
 # ============ CONFIG ============
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -57,16 +56,13 @@ class UserState(Base):
     min_interval = Column(Integer, default=60)
     max_interval = Column(Integer, default=180)
     avatar_url = Column(Text, nullable=True)
-    # Avatar preferences
     avatar_gender = Column(String(20), default=None)
     avatar_race = Column(String(20), default=None)
     avatar_build = Column(String(20), default=None)
     avatar_hair = Column(String(20), default=None)
     avatar_genital_size = Column(String(20), default=None)
-    # Reward tracking
     challenges_since_reward = Column(Integer, default=0)
     last_kinks_used = Column(Text, default=None)
-    # Kinks - "no" = hard limit, "okay" = allowed, "yes" = desired
     kink_exposure = Column(String(10), default="no")
     kink_humiliation = Column(String(10), default="no")
     kink_degradation = Column(String(10), default="no")
@@ -140,33 +136,33 @@ RISK_LEVELS = {
 
 KINK_CATEGORIES = {
     "kink_exposure": ("📸 Exposure", "Being seen/photographed"),
-    "kink_humiliation": ("😳 Humiliation", "Verbal degradation, embarrassment"),
-    "kink_degradation": ("🗑️ Degradation", "Being treated as inferior/object"),
-    "kink_bondage": ("⛓️ Bondage", "Restraint, tied up"),
-    "kink_pain": ("🔥 Pain", "Impact play, discomfort"),
-    "kink_service": ("🙇 Service", "Serving, chores, tasks"),
-    "kink_edging": ("⏱️ Edging", "Orgasm denial, control"),
+    "kink_humiliation": ("😳 Humiliation", "Verbal degradation"),
+    "kink_degradation": ("🗑️ Degradation", "Being treated as inferior"),
+    "kink_bondage": ("⛓️ Bondage", "Restraint"),
+    "kink_pain": ("🔥 Pain", "Impact play"),
+    "kink_service": ("🙇 Service", "Serving, chores"),
+    "kink_edging": ("⏱️ Edging", "Orgasm denial"),
     "kink_watersports": ("💧 Watersports", "Pee play"),
     "kink_exhibitionism": ("🎭 Exhibitionism", "Public exposure"),
-    "kink_roleplay": ("🎪 Roleplay", "Scenarios, characters"),
+    "kink_roleplay": ("🎪 Roleplay", "Scenarios"),
     "kink_petplay": ("🐾 Pet Play", "Animal roleplay"),
-    "kink_feminization": ("💄 Feminization", "Forced fem, sissy"),
+    "kink_feminization": ("💄 Feminization", "Forced fem"),
     "kink_cbt": ("🔩 CBT", "Cock/ball torture"),
-    "kink_breathplay": ("😮‍💨 Breath Play", "Choking, breath control"),
-    "kink_sensory": ("🙈 Sensory", "Blindfolds, earplugs"),
-    "kink_temperature": ("🌡️ Temperature", "Ice, heat, wax"),
-    "kink_marking": ("✏️ Marking", "Writing, body writing"),
-    "kink_spanking": ("👋 Spanking", "Slapping, impact"),
-    "kink_nipple": ("👀 Nipple", "Nipple play, clamps"),
-    "kink_anal": ("🍑 Anal", "Ass play, plugs"),
-    "kink_gags": ("🔇 Gags", "Gags, mouth restriction"),
-    "kink_social_media": ("📱 Social Media", "Online exposure/tasks")
+    "kink_breathplay": ("😮‍💨 Breath Play", "Choking"),
+    "kink_sensory": ("🙈 Sensory", "Blindfolds"),
+    "kink_temperature": ("🌡️ Temperature", "Ice/heat/wax"),
+    "kink_marking": ("✏️ Marking", "Body writing"),
+    "kink_spanking": ("👋 Spanking", "Slapping"),
+    "kink_nipple": ("👀 Nipple", "Nipple play"),
+    "kink_anal": ("🍑 Anal", "Ass play"),
+    "kink_gags": ("🔇 Gags", "Mouth restriction"),
+    "kink_social_media": ("📱 Social Media", "Online exposure")
 }
 
 KINK_LEVELS = {
-    "no": {"emoji": "❌", "name": "No", "desc": "Hard limit - never"},
-    "okay": {"emoji": "⭕", "name": "Okay", "desc": "Allowed - Dom decides"},
-    "yes": {"emoji": "✅", "name": "Yes", "desc": "Desired - please include"}
+    "no": {"emoji": "❌", "name": "No", "desc": "Hard limit"},
+    "okay": {"emoji": "⭕", "name": "Okay", "desc": "Allowed"},
+    "yes": {"emoji": "✅", "name": "Yes", "desc": "Desired"}
 }
 
 OUTFIT_OPTIONS = {
@@ -211,27 +207,21 @@ AVATAR_RACES = {
 }
 
 AVATAR_BUILDS = {
-    "slim": {"emoji": "🧍", "name": "Slim/Ectomorph", "desc": "extremely skinny, no muscle, petite, waif-like, bony, fragile"},
-    "athletic": {"emoji": "💪", "name": "Athletic", "desc": "fit, toned, muscular definition"},
-    "curvy": {"emoji": "🍑", "name": "Curvy", "desc": "full figured, wide hips, voluptuous"},
-    "muscular": {"emoji": "🏋️", "name": "Muscular", "desc": "ripped, bodybuilder, strong"}
+    "slim": {"emoji": "🧍", "name": "Slim", "desc": "extremely skinny, petite, waif-like"},
+    "athletic": {"emoji": "💪", "name": "Athletic", "desc": "fit, toned, muscular"},
+    "curvy": {"emoji": "🍑", "name": "Curvy", "desc": "full figured, wide hips"},
+    "muscular": {"emoji": "🏋️", "name": "Muscular", "desc": "ripped, bodybuilder"}
 }
 
 AVATAR_HAIR = {
-    "blonde": "Blonde",
-    "brunette": "Brunette",
-    "black": "Black",
-    "red": "Red",
-    "pink": "Pink",
-    "blue": "Blue",
-    "purple": "Purple",
-    "white": "White/Silver"
+    "blonde": "Blonde", "brunette": "Brunette", "black": "Black",
+    "red": "Red", "pink": "Pink", "blue": "Blue", "purple": "Purple", "white": "White/Silver"
 }
 
 AVATAR_SIZES = {
-    "small": {"emoji": "🔹", "name": "Small", "male": "small petite penis", "female": "small petite breasts", "trans": "small breasts and penis"},
-    "medium": {"emoji": "🔸", "name": "Medium", "male": "medium sized penis", "female": "medium full breasts", "trans": "medium breasts and penis"},
-    "large": {"emoji": "🔶", "name": "Large", "male": "large thick penis", "female": "large voluptuous breasts", "trans": "large breasts and penis"}
+    "small": {"emoji": "🔹", "name": "Small", "male": "small penis", "female": "small breasts", "trans": "small breasts and penis"},
+    "medium": {"emoji": "🔸", "name": "Medium", "male": "medium penis", "female": "medium breasts", "trans": "medium breasts and penis"},
+    "large": {"emoji": "🔶", "name": "Large", "male": "large penis", "female": "large breasts", "trans": "large breasts and penis"}
 }
 
 DOMINANT_POSES = [
@@ -248,16 +238,9 @@ DOMINANT_POSES = [
 ]
 
 DOMINANT_OUTFITS = [
-    "latex catsuit",
-    "leather corset and thigh boots",
-    "dominatrix outfit with gloves",
-    "sheer bodysuit with harness",
-    "pvc dress with choker",
-    "fishnet bodysuit with straps",
-    "leather harness and panties",
-    "lace lingerie with garter belt",
-    "shiny metallic bikini",
-    "strappy harness outfit"
+    "latex catsuit", "leather corset and thigh boots", "dominatrix outfit with gloves",
+    "sheer bodysuit with harness", "pvc dress with choker", "fishnet bodysuit with straps",
+    "leather harness and panties", "lace lingerie with garter belt", "shiny metallic bikini", "strappy harness outfit"
 ]
 
 # ============ HELPERS ============
@@ -271,12 +254,7 @@ def get_user_kinks(user, level=None):
             kinks.append(k.replace("kink_", ""))
     return kinks
 
-def get_kink_level(user, kink_name):
-    full_name = f"kink_{kink_name}" if not kink_name.startswith("kink_") else kink_name
-    return getattr(user, full_name, "no")
-
 def get_title(avatar_gender):
-    """Get appropriate title based on avatar gender"""
     return "Sir" if avatar_gender == "male" else "Mistress"
 
 async def generate_ai_response(prompt, temperature=0.9):
@@ -309,7 +287,7 @@ async def analyze_image(image_bytes, task_desc):
 
 Verify this photo. Be REASONABLE about:
 - Selfie angles (can't see own face/back in selfie)
-- Lighting and shadows
+- Lighting and shadows  
 - Equivalent items (any clamp = clothespin, any tie = rope, etc.)
 
 Does this show completion? Reply:
@@ -343,7 +321,6 @@ def parse_verification(response):
     return verified, reason
 
 async def generate_task_text(user, session=None):
-    """Generate task with strict filtering"""
     outfit_items = json.loads(user.outfit_items or '[]')
     gender = user.gender or "nonbinary"
     base_risk = user.risk_level or 1
@@ -440,6 +417,7 @@ Task:"""
 
 # ============ AVATAR ============
 async def generate_avatar_pose(user, pose_type="dominant"):
+    """Generate avatar and return bytes"""
     try:
         gender = user.avatar_gender or user.gender or "female"
         race = user.avatar_race or "white"
@@ -467,53 +445,102 @@ async def generate_avatar_pose(user, pose_type="dominant"):
             "seed": random.randint(1, 1000000)
         }
         
+        logger.info(f"Generating image...")
         response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
+        
+        logger.info(f"Image API status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
             if 'images' in result and result['images']:
-                return result['images'][0]
+                image_data = result['images'][0]
+                
+                # Handle URL
+                if image_data.startswith('http'):
+                    img_response = requests.get(image_data, timeout=30)
+                    if img_response.status_code == 200:
+                        return img_response.content
+                    else:
+                        logger.error(f"Failed to download: {img_response.status_code}")
+                        return None
+                # Handle base64 data URI
+                elif image_data.startswith('data:image'):
+                    base64_data = image_data.split(',')[1]
+                    return base64.b64decode(base64_data)
+                # Handle raw base64
+                else:
+                    try:
+                        return base64.b64decode(image_data)
+                    except:
+                        logger.error("Unknown image format")
+                        return None
         
-        logger.error(f"Avatar failed: {response.status_code}")
+        logger.error(f"Image API error: {response.status_code}")
         return None
         
     except Exception as e:
         logger.error(f"Avatar error: {e}")
         return None
 
-async def generate_avatar_pose_image(gender, race, build, hair, size):
+async def send_avatar_photo(context, chat_id, image_bytes, caption):
+    """Helper to send avatar photo from bytes"""
     try:
-        gender_desc = AVATAR_GENDERS[gender]['desc']
-        race_desc = AVATAR_RACES[race]['name'].split('/')[0]
-        build_desc = AVATAR_BUILDS[build]['desc']
-        size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
-        
-        if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
-        else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
-        
-        headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {
-            "model": "chroma",
-            "prompt": prompt,
-            "width": 512,
-            "height": 768,
-            "seed": random.randint(1, 1000000)
-        }
-        
-        response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if 'images' in result and result['images']:
-                return result['images'][0]
-        
-        return None
-        
+        if image_bytes:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=BytesIO(image_bytes),
+                caption=caption
+            )
+            return True
     except Exception as e:
-        logger.error(f"Avatar error: {e}")
-        return None
+        logger.error(f"Send photo error: {e}")
+    return False
+
+# ============ CHAT HANDLER ============
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Respond to regular messages conversationally"""
+    if context.user_data.get('awaiting_custom_outfit') or \
+       context.user_data.get('awaiting_custom_location') or \
+       context.user_data.get('awaiting_interval'):
+        return
+    
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        title = get_title(user.avatar_gender if user else None)
+        
+        context_info = ""
+        if user:
+            context_info = f"User is {user.gender or 'unknown'}, wearing {user.current_outfit or 'unknown'}, at {user.custom_location or 'unknown'}. "
+            context_info += f"They have {user.points} points, streak {user.streak}. "
+        
+        prompt = f"""You are a dominant {title}. Respond to this message from your submissive briefly (1-2 sentences). Be playful but commanding, use pet names.
+
+{context_info}
+
+Their message: "{message_text}"
+
+Respond as {title}:"""
+        
+        response = await generate_ai_response(prompt, temperature=0.9)
+        
+        if response:
+            await update.message.reply_text(response.strip())
+        else:
+            fallbacks = [
+                f"Mmm? Speak up, pet.",
+                f"Is that how you address {title}?",
+                f"You're distracting me, toy.",
+                f"Save your words and show me action instead.",
+                f"Interesting. Now get back to your task."
+            ]
+            await update.message.reply_text(random.choice(fallbacks))
+            
+    finally:
+        session.close()
 
 # ============ COMMANDS ============
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -970,53 +997,6 @@ async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TY
     
     context.user_data['awaiting_interval'] = False
 
-# ============ CHAT HANDLER ============
-async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Respond to regular messages conversationally"""
-    user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    # Skip if waiting for custom input
-    if context.user_data.get('awaiting_custom_outfit') or \
-       context.user_data.get('awaiting_custom_location') or \
-       context.user_data.get('awaiting_interval'):
-        return
-    
-    session = get_session()
-    try:
-        user = session.query(UserState).filter_by(user_id=user_id).first()
-        title = get_title(user.avatar_gender if user else None)
-        
-        context_info = ""
-        if user:
-            context_info = f"User is {user.gender or 'unknown'}, wearing {user.current_outfit or 'unknown'}, at {user.custom_location or 'unknown'}. "
-            context_info += f"They have {user.points} points, streak {user.streak}. "
-        
-        prompt = f"""You are a dominant {title}. Respond to this message from your submissive briefly (1-2 sentences). Be playful but commanding, use pet names.
-
-{context_info}
-
-Their message: "{message_text}"
-
-Respond as {title}:"""
-        
-        response = await generate_ai_response(prompt, temperature=0.9)
-        
-        if response:
-            await update.message.reply_text(response.strip())
-        else:
-            fallbacks = [
-                f"Mmm? Speak up, pet.",
-                f"Is that how you address {title}?",
-                f"You're distracting me, toy.",
-                f"Save your words and show me action instead.",
-                f"Interesting. Now get back to your task."
-            ]
-            await update.message.reply_text(random.choice(fallbacks))
-            
-    finally:
-        session.close()
-
 # ============ TASK COMMANDS ============
 async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1046,9 +1026,9 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Avatar image chance
         if random.random() < 0.3 and user.avatar_gender:
-            avatar_url = await generate_avatar_pose(user, "dominant")
-            if avatar_url:
-                await context.bot.send_photo(chat_id=user_id, photo=avatar_url, caption="Your task awaits...")
+            avatar_bytes = await generate_avatar_pose(user, "dominant")
+            if avatar_bytes:
+                await send_avatar_photo(context, user_id, avatar_bytes, "Your task awaits...")
                 await asyncio.sleep(1)
         
         task_text = await generate_task_text(user, session)
@@ -1060,26 +1040,64 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.add(task)
         session.commit()
         
-        scheduler.add_job(
+        context.job_queue.run_once(
             auto_clear_task,
-            'date',
-            run_date=expires,
-            args=[user_id, task.id, context],
-            id=f"timeout_{task.id}",
-            replace_existing=True
+            when=expires,
+            data={'user_id': user_id, 'task_id': task.id},
+            name=f"timeout_{task.id}"
         )
         
         title = get_title(user.avatar_gender)
         
         keyboard = [
             [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")]
+            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
+            [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
         ]
         
         await update.message.reply_text(
             f"🎯 TASK\n\n{task_text}\n\n30 minutes.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+    finally:
+        session.close()
+
+async def mercy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Offer mercy - give alternative task"""
+    query = update.callback_query
+    await query.answer()
+    task_id = int(query.data.replace("mercy_", ""))
+    user_id = update.effective_user.id
+    
+    session = get_session()
+    try:
+        task = session.query(Task).filter_by(id=task_id, user_id=user_id, status="pending").first()
+        if not task:
+            await query.edit_message_text("No active task.")
+            return
+        
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        title = get_title(user.avatar_gender)
+        
+        await query.edit_message_text(f"Mercy granted, pet. Let me find something else...")
+        
+        new_task_text = await generate_task_text(user, session)
+        task.task_text = new_task_text
+        task.verification_attempts = 0
+        session.commit()
+        
+        keyboard = [
+            [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
+            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
+            [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
+        ]
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"🔄 NEW TASK (Mercy)\n\n{new_task_text}\n\n30 minutes.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
     finally:
         session.close()
 
@@ -1099,7 +1117,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title = get_title(user.avatar_gender)
             keyboard = [
                 [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{active.id}")],
-                [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{active.id}")]
+                [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{active.id}")],
+                [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{active.id}")]
             ]
             await update.message.reply_text(
                 f"⏰ {max(0, time_left):.0f} min left\n\n{active.task_text[:200]}...",
@@ -1183,20 +1202,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             title = get_title(user.avatar_gender)
             
-            # Check for reward (every 5-10 challenges)
             if user.challenges_since_reward >= random.randint(5, 10):
                 user.challenges_since_reward = 0
                 session.commit()
                 
                 await update.message.reply_text(f"✅ +{10 * task.risk_level} points! Streak: {user.streak}\n\n🎁 Reward earned!")
                 
-                reward_url = await generate_avatar_pose(user, "reward")
-                if reward_url:
-                    await context.bot.send_photo(
-                        chat_id=user_id,
-                        photo=reward_url,
-                        caption=f"🎁 Your reward, {title} is pleased."
-                    )
+                reward_bytes = await generate_avatar_pose(user, "reward")
+                if reward_bytes:
+                    await send_avatar_photo(context, user_id, reward_bytes, f"🎁 Your reward, {title} is pleased.")
                 else:
                     await update.message.reply_text("🎁 Reward earned!")
             else:
@@ -1251,7 +1265,12 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text("📸 Send retry photo.")
 
-async def auto_clear_task(user_id, task_id, context):
+async def auto_clear_task(context: ContextTypes.DEFAULT_TYPE):
+    """Job queue callback for task timeout"""
+    job_data = context.job.data
+    user_id = job_data['user_id']
+    task_id = job_data['task_id']
+    
     logger.info(f"Timeout task {task_id}")
     session = get_session()
     try:
@@ -1356,9 +1375,9 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.edit_message_text("🎨 Generating avatar...")
     
-    image_url = await generate_avatar_pose_image(gender, race, build, hair, size)
+    image_bytes = await generate_avatar_pose_image(gender, race, build, hair, size)
     
-    if image_url:
+    if image_bytes:
         session = get_session()
         try:
             user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -1370,24 +1389,69 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user.avatar_genital_size = size
                 session.commit()
             
-            avatar = AvatarImage(user_id=user_id, image_url=image_url, gender=gender, race=race, build=build)
+            avatar = AvatarImage(user_id=user_id, image_url="generated", gender=gender, race=race, build=build)
             session.add(avatar)
             session.commit()
             
             await query.edit_message_text("✅ Avatar generated!")
-            await context.bot.send_photo(
-                chat_id=user_id,
-                photo=image_url,
-                caption=f"🎨 Your Avatar\nGender: {AVATAR_GENDERS[gender]['name']}\nRace: {AVATAR_RACES[race]['name']}\nBuild: {AVATAR_BUILDS[build]['name']}\nHair: {AVATAR_HAIR[hair]}\nSize: {AVATAR_SIZES[size]['name']}"
+            await send_avatar_photo(
+                context, user_id, image_bytes,
+                f"🎨 Your Avatar\nGender: {AVATAR_GENDERS[gender]['name']}\nRace: {AVATAR_RACES[race]['name']}\nBuild: {AVATAR_BUILDS[build]['name']}\nHair: {AVATAR_HAIR[hair]}\nSize: {AVATAR_SIZES[size]['name']}"
             )
         finally:
             session.close()
     else:
         await query.edit_message_text("❌ Error generating avatar.")
 
-# ============ SCHEDULER ============
-scheduler = AsyncIOScheduler()
+async def generate_avatar_pose_image(gender, race, build, hair, size):
+    """Generate initial avatar image"""
+    try:
+        gender_desc = AVATAR_GENDERS[gender]['desc']
+        race_desc = AVATAR_RACES[race]['name'].split('/')[0]
+        build_desc = AVATAR_BUILDS[build]['desc']
+        size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
+        
+        if gender == "trans":
+            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
+        else:
+            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
+        
+        headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
+        data = {
+            "model": "chroma",
+            "prompt": prompt,
+            "width": 512,
+            "height": 768,
+            "seed": random.randint(1, 1000000)
+        }
+        
+        response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'images' in result and result['images']:
+                image_data = result['images'][0]
+                
+                if image_data.startswith('http'):
+                    img_response = requests.get(image_data, timeout=30)
+                    if img_response.status_code == 200:
+                        return img_response.content
+                elif image_data.startswith('data:image'):
+                    base64_data = image_data.split(',')[1]
+                    return base64.b64decode(base64_data)
+                else:
+                    try:
+                        return base64.b64decode(image_data)
+                    except:
+                        pass
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Avatar error: {e}")
+        return None
 
+# ============ SCHEDULER ============
 async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("▶️ Enable", callback_data="sched_enable")],
@@ -1417,56 +1481,71 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-async def random_interval_check(context):
+async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
+    """Check for scheduled tasks"""
     session = get_session()
     try:
         now = datetime.now(timezone.utc)
-        users = session.query(UserState).filter(UserState.scheduling_enabled == True, UserState.next_task_time <= now).all()
+        users = session.query(UserState).filter(
+            UserState.scheduling_enabled == True,
+            UserState.next_task_time <= now
+        ).all()
         
         for user in users:
             active = session.query(Task).filter_by(user_id=user.user_id, status="pending").first()
             if not active:
                 try:
+                    # Send avatar if available
                     if random.random() < 0.3 and user.avatar_gender:
-                        avatar_url = await generate_avatar_pose(user, "dominant")
-                        if avatar_url:
-                            await context.bot.send_photo(chat_id=user.user_id, photo=avatar_url, caption="Your task awaits...")
+                        avatar_bytes = await generate_avatar_pose(user, "dominant")
+                        if avatar_bytes:
+                            await send_avatar_photo(context, user.user_id, avatar_bytes, "Your task awaits...")
                             await asyncio.sleep(1)
                     
+                    # Generate task
                     task_text = await generate_task_text(user, session)
                     
                     expires = now + timedelta(minutes=30)
-                    task = Task(user_id=user.user_id, task_text=task_text, risk_level=user.risk_level, created_at=now, expires_at=expires)
+                    task = Task(
+                        user_id=user.user_id,
+                        task_text=task_text,
+                        risk_level=user.risk_level,
+                        created_at=now,
+                        expires_at=expires
+                    )
                     session.add(task)
                     session.commit()
                     
-                    title = get_title(user.avatar_gender)
-                    
-                    scheduler.add_job(
+                    # Schedule timeout
+                    context.job_queue.run_once(
                         auto_clear_task,
-                        'date',
-                        run_date=expires,
-                        args=[user.user_id, task.id, context],
-                        id=f"timeout_{task.id}",
-                        replace_existing=True
+                        when=expires,
+                        data={'user_id': user.user_id, 'task_id': task.id},
+                        name=f"timeout_{task.id}"
                     )
                     
+                    # Send task
+                    title = get_title(user.avatar_gender)
                     keyboard = [
                         [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
-                        [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")]
+                        [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
+                        [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
                     ]
+                    
                     await context.bot.send_message(
                         chat_id=user.user_id,
                         text=f"🎯 AUTO TASK\n\n{task_text}\n\n30 minutes.",
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     
+                    # Update next task time
                     user.next_task_time = now + timedelta(minutes=random.randint(user.min_interval, user.max_interval))
                     session.commit()
+                    
                 except Exception as e:
                     logger.error(f"Auto-task error: {e}")
     except Exception as e:
-        logger.error(f"Interval check error: {e}")
+        logger.error(f"Scheduled check error: {e}")
     finally:
         session.close()
 
@@ -1503,24 +1582,16 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ MAIN ============
 def main():
-    scheduler.start()
-    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # FIX: Use application.job_queue instead of apscheduler directly
-    # Or wrap the call properly
-    
-    async def scheduled_check(context: ContextTypes.DEFAULT_TYPE):
-        await random_interval_check(context.application)
-    
-    # Add to job_queue instead of using apscheduler directly
+    # Scheduled tasks using job_queue
     application.job_queue.run_repeating(
-        scheduled_check,
-        interval=60,  # 60 seconds
-        first=10,  # Start after 10 seconds
-        name="interval_check"
+        scheduled_task_check,
+        interval=60,
+        first=10,
+        name="scheduled_check"
     )
-        
+    
     # Commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("gender", gender_cmd))
@@ -1558,22 +1629,12 @@ def main():
     application.add_handler(CallbackQueryHandler(avatar_build_callback, pattern="^av_build_"))
     application.add_handler(CallbackQueryHandler(avatar_hair_callback, pattern="^av_hair_"))
     application.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
+    application.add_handler(CallbackQueryHandler(mercy_callback, pattern="^mercy_"))
     
-    # Messages
+    # Photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    # Custom text handlers
-    async def custom_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if context.user_data.get('awaiting_custom_outfit'):
-            await handle_custom_outfit(update, context)
-        elif context.user_data.get('awaiting_custom_location'):
-            await handle_custom_location(update, context)
-        elif context.user_data.get('awaiting_interval'):
-            await handle_interval_input(update, context)
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_text_handler))
-    
-    # General chat handler (must be last)
+    # Chat handler (must be last for text)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
     
     logger.info("Bot starting...")
