@@ -5,6 +5,8 @@ import asyncio
 import base64
 import random
 import requests
+import cloudinary
+import cloudinary.uploader
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 
@@ -26,6 +28,14 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
+
+# Cloudinary Configuration
+cloudinary.config(
+    cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
+    api_key=os.getenv('CLOUDINARY_API_KEY'),
+    api_secret=os.getenv('CLOUDINARY_API_SECRET'),
+    secure=True
+)
 
 # ============ DATABASE ============
 Base = declarative_base()
@@ -97,6 +107,8 @@ class Task(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     photo_url = Column(Text, nullable=True)
+    cloudinary_url = Column(Text, nullable=True)  # Added for Cloudinary backup
+    cloudinary_public_id = Column(Text, nullable=True)  # Added for Cloudinary management
     verification_attempts = Column(Integer, default=0)
 
 class TaskHistory(Base):
@@ -113,10 +125,22 @@ class AvatarImage(Base):
     id = Column(BigInteger, primary_key=True)
     user_id = Column(BigInteger, nullable=False)
     image_url = Column(Text, nullable=False)
+    cloudinary_url = Column(Text, nullable=True)  # Added for Cloudinary backup
+    cloudinary_public_id = Column(Text, nullable=True)  # Added for Cloudinary management
     gender = Column(String(20))
     race = Column(String(20))
     build = Column(String(20))
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class UserImage(Base):
+    __tablename__ = 'user_images'
+    id = Column(BigInteger, primary_key=True)
+    user_id = Column(BigInteger, nullable=False)
+    telegram_file_id = Column(Text, nullable=False)
+    cloudinary_url = Column(Text, nullable=True)
+    cloudinary_public_id = Column(Text, nullable=True)
+    image_type = Column(String(50), default='user_upload')  # user_upload, avatar, reward, verification
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 Base.metadata.create_all(engine)
@@ -124,6 +148,45 @@ Session = sessionmaker(bind=engine)
 
 def get_session():
     return Session()
+
+# ============ CLOUDINARY HELPERS ============
+async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', folder='telegram_bot'):
+    """Upload image to Cloudinary and return result dict"""
+    try:
+        # Convert to BytesIO if needed
+        if isinstance(image_bytes, (bytes, bytearray)):
+            image_bytes = BytesIO(image_bytes)
+        
+        image_bytes.seek(0)
+        
+        # Generate unique public_id
+        timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+        public_id = f"{folder}/user_{user_id}/{image_type}_{timestamp}_{random.randint(1000, 9999)}"
+        
+        # Upload to Cloudinary
+        result = cloudinary.uploader.upload(
+            image_bytes,
+            public_id=public_id,
+            resource_type="image",
+            context={
+                'user_id': str(user_id),
+                'image_type': image_type,
+                'uploaded_at': str(datetime.now(timezone.utc))
+            },
+            tags=[f"user_{user_id}", image_type, "telegram_bot"]
+        )
+        
+        logger.info(f"Cloudinary upload success: {result.get('public_id')}")
+        return {
+            'url': result.get('secure_url'),
+            'public_id': result.get('public_id'),
+            'width': result.get('width'),
+            'height': result.get('height')
+        }
+        
+    except Exception as e:
+        logger.error(f"Cloudinary upload error: {e}")
+        return None
 
 # ============ CONSTANTS ============
 RISK_LEVELS = {
@@ -1157,23 +1220,16 @@ async def rewards_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-# ============ PHOTO HANDLING ============
+# ============ PHOTO HANDLING WITH CLOUDINARY ============
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session()
+    cloudinary_result = None
+    
     try:
         task = session.query(Task).filter_by(user_id=user_id, status="pending").first()
-        if not task:
-            await update.message.reply_text("No active task. Use /task.")
-            return
         
-        now = datetime.now(timezone.utc)
-        if now > task.expires_at:
-            task.status = "expired"
-            session.commit()
-            await update.message.reply_text("Task expired. Use /task.")
-            return
-        
+        # Download photo from Telegram first
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
@@ -1184,13 +1240,54 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Photo too small. Send clearer photo.")
             return
         
+        # Upload to Cloudinary FIRST (backup all user photos)
+        cloudinary_result = await upload_to_cloudinary(
+            photo_bytes, 
+            user_id, 
+            image_type='verification' if task else 'user_upload'
+        )
+        
+        # Save to UserImage table for backup tracking
+        user_image = UserImage(
+            user_id=user_id,
+            telegram_file_id=photo.file_id,
+            cloudinary_url=cloudinary_result['url'] if cloudinary_result else None,
+            cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None,
+            image_type='verification' if task else 'user_upload'
+        )
+        session.add(user_image)
+        session.commit()
+        
+        # If no active task, just confirm backup
+        if not task:
+            msg = "📸 Image saved to your collection."
+            if cloudinary_result:
+                msg += f"\n☁️ Backed up to cloud."
+            await update.message.reply_text(msg)
+            return
+        
+        # Process task verification
+        now = datetime.now(timezone.utc)
+        if now > task.expires_at:
+            task.status = "expired"
+            session.commit()
+            await update.message.reply_text("Task expired. Use /task.")
+            return
+        
+        # Verify with Venice AI
         verification = await analyze_image(photo_bytes, task.task_text)
         verified, reason = parse_verification(verification)
         task.verification_attempts += 1
         
+        # Update task with Cloudinary URL
+        if cloudinary_result:
+            task.cloudinary_url = cloudinary_result['url']
+            task.cloudinary_public_id = cloudinary_result['public_id']
+        
         if verified == "yes":
             task.status = "completed"
             task.completed_at = now
+            task.photo_url = photo.file_id  # Keep Telegram file_id too
             
             user = session.query(UserState).filter_by(user_id=user_id).first()
             user.points += 10 * task.risk_level
@@ -1210,7 +1307,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 reward_bytes = await generate_avatar_pose(user, "reward")
                 if reward_bytes:
+                    # Also backup reward images to Cloudinary
+                    reward_cloudinary = await upload_to_cloudinary(
+                        reward_bytes, user_id, image_type='reward'
+                    )
                     await send_avatar_photo(context, user_id, reward_bytes, f"🎁 Your reward, {title} is pleased.")
+                    
+                    # Save reward image record
+                    if reward_cloudinary:
+                        reward_image = UserImage(
+                            user_id=user_id,
+                            telegram_file_id='generated',
+                            cloudinary_url=reward_cloudinary['url'],
+                            cloudinary_public_id=reward_cloudinary['public_id'],
+                            image_type='reward'
+                        )
+                        session.add(reward_image)
+                        session.commit()
                 else:
                     await update.message.reply_text("🎁 Reward earned!")
             else:
@@ -1345,7 +1458,7 @@ async def avatar_build_callback(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['avatar_build'] = build
     
     keyboard = [[InlineKeyboardButton(h, callback_data=f"av_hair_{k}")] for k, h in AVATAR_HAIR.items()]
-    await query.edit_message_text(f"✅ Build: {AVATAR_BUILDS[build]['name']}\n\nStep 4/5: Select hair:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"✅ Build: {AVATAR_BUILDS[build]['name']}\n\nStep 4/5: Select hair:", replyMarkup=InlineKeyboardMarkup(keyboard))
 
 async def avatar_hair_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1389,7 +1502,20 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user.avatar_genital_size = size
                 session.commit()
             
-            avatar = AvatarImage(user_id=user_id, image_url="generated", gender=gender, race=race, build=build)
+            # Upload avatar to Cloudinary too
+            cloudinary_result = await upload_to_cloudinary(
+                image_bytes, user_id, image_type='avatar'
+            )
+            
+            avatar = AvatarImage(
+                user_id=user_id, 
+                image_url="generated", 
+                cloudinary_url=cloudinary_result['url'] if cloudinary_result else None,
+                cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None,
+                gender=gender, 
+                race=race, 
+                build=build
+            )
             session.add(avatar)
             session.commit()
             
@@ -1571,6 +1697,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.query(Task).filter_by(user_id=user_id).delete()
         session.query(TaskHistory).filter_by(user_id=user_id).delete()
         session.query(AvatarImage).filter_by(user_id=user_id).delete()
+        session.query(UserImage).filter_by(user_id=user_id).delete()  # Also delete user images
         session.query(UserState).filter_by(user_id=user_id).delete()
         session.commit()
         await query.edit_message_text("✅ All data deleted. Send /start.")
