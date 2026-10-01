@@ -73,6 +73,11 @@ class UserState(Base):
     avatar_genital_size = Column(String(20), default=None)
     challenges_since_reward = Column(Integer, default=0)
     last_kinks_used = Column(Text, default=None)
+    # New columns for input state tracking
+    awaiting_custom_outfit = Column(Boolean, default=False)
+    awaiting_custom_location = Column(Boolean, default=False)
+    awaiting_interval = Column(Boolean, default=False)
+    # Kink columns
     kink_exposure = Column(String(10), default="no")
     kink_humiliation = Column(String(10), default="no")
     kink_degradation = Column(String(10), default="no")
@@ -194,7 +199,6 @@ RISK_LEVELS = {
     5: {"name": "Extreme", "description": "Public-adjacent (hallways, stairwells, high exposure possible)"}
 }
 
-# Optional inspiration for AI - not constraints
 RISK_INSPIRATION = {
     "Hotel": {
         3: ["room with curtains open", "balcony", "near window"],
@@ -224,7 +228,6 @@ RISK_INSPIRATION = {
 }
 
 def get_risk_inspiration(location, risk_level):
-    """Get optional inspiration examples for the AI - not constraints"""
     if risk_level < 3:
         return ""
     
@@ -438,10 +441,8 @@ async def generate_task_text(user, session=None):
     others = user.context_others or "alone"
     privacy = user.context_privacy or "private"
     
-    # Calculate actual risk for this task - uniform 1 to max_risk
     actual_risk = random.randint(1, max_risk)
     
-    # Kids safety override
     if others == "kids":
         actual_risk = min(2, actual_risk)
         max_risk = min(2, max_risk)
@@ -482,7 +483,6 @@ async def generate_task_text(user, session=None):
     if session:
         session.commit()
     
-    # Build risk context - note this is the ACTUAL risk, not max
     risk_desc = RISK_LEVELS[actual_risk]["description"]
     risk_inspiration = get_risk_inspiration(location, actual_risk) if actual_risk >= 3 else ""
     
@@ -532,7 +532,6 @@ Task:"""
         
         return response
     
-    # Fallback that respects actual risk
     fallbacks = {
         1: f"Strip completely at {location} and photograph your reflection",
         2: f"Strip at {location} near the unlocked door and take a photo",
@@ -585,7 +584,6 @@ async def generate_avatar_pose(user, pose_type="dominant"):
                 image_data = result['images'][0]
                 logger.info(f"Image data type: {type(image_data)}, starts with: {str(image_data)[:50]}")
                 
-                # Handle URL
                 if isinstance(image_data, str) and image_data.startswith('http'):
                     img_response = requests.get(image_data, timeout=30)
                     if img_response.status_code == 200:
@@ -594,13 +592,11 @@ async def generate_avatar_pose(user, pose_type="dominant"):
                     else:
                         logger.error(f"Failed to download: {img_response.status_code}")
                         return None
-                # Handle base64 data URI
                 elif isinstance(image_data, str) and image_data.startswith('data:image'):
                     base64_data = image_data.split(',')[1]
                     decoded = base64.b64decode(base64_data)
                     logger.info(f"Decoded base64 data URI: {len(decoded)} bytes")
                     return decoded
-                # Handle raw base64 string
                 elif isinstance(image_data, str):
                     try:
                         decoded = base64.b64decode(image_data)
@@ -609,7 +605,6 @@ async def generate_avatar_pose(user, pose_type="dominant"):
                     except Exception as e:
                         logger.error(f"Failed to decode base64: {e}")
                         return None
-                # Handle bytes directly
                 elif isinstance(image_data, bytes):
                     logger.info(f"Got bytes directly: {len(image_data)} bytes")
                     return image_data
@@ -626,15 +621,29 @@ async def generate_avatar_pose(user, pose_type="dominant"):
 async def send_avatar_photo(context, chat_id, image_bytes, caption):
     """Helper to send avatar photo from bytes"""
     try:
-        if image_bytes:
-            buf = BytesIO(image_bytes)
-            buf.seek(0)
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=buf,
-                caption=caption
-            )
-            return True
+        if not image_bytes or len(image_bytes) < 1000:
+            logger.error(f"Invalid image bytes: {len(image_bytes) if image_bytes else 'None'}")
+            return False
+        
+        # Validate it's actually an image by checking magic bytes
+        header = image_bytes[:20]
+        is_jpeg = header.startswith(b'\xff\xd8')
+        is_png = header.startswith(b'\x89PNG')
+        
+        if not (is_jpeg or is_png):
+            logger.error(f"Invalid image format. Header: {header[:10]}")
+            return False
+        
+        buf = BytesIO(image_bytes)
+        buf.seek(0)
+        
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=buf,
+            caption=caption
+        )
+        logger.info(f"Photo sent successfully: {len(image_bytes)} bytes")
+        return True
     except Exception as e:
         logger.error(f"Send photo error: {e}")
         import traceback
@@ -644,12 +653,17 @@ async def send_avatar_photo(context, chat_id, image_bytes, caption):
 # ============ CHAT HANDLER ============
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Respond to regular messages conversationally"""
-    if context.user_data.get('awaiting_custom_outfit') or \
-       context.user_data.get('awaiting_custom_location') or \
-       context.user_data.get('awaiting_interval'):
-        return
-    
     user_id = update.effective_user.id
+    
+    # Check database for awaiting states
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        if user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval):
+            return  # Let specific handlers take it
+    finally:
+        session.close()
+    
     message_text = update.message.text
     
     session = get_session()
@@ -787,7 +801,8 @@ async def outfit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if outfit_key == "custom":
-            context.user_data['awaiting_custom_outfit'] = True
+            user.awaiting_custom_outfit = True  # Store in DB
+            session.commit()
             await query.edit_message_text("Describe your outfit:")
             return
         
@@ -802,24 +817,24 @@ async def outfit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_custom_outfit'):
-        return
-    
-    # Clear flag FIRST
-    context.user_data['awaiting_custom_outfit'] = False
-    
     user_id = update.effective_user.id
-    custom = update.message.text
     
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if user:
-            user.current_outfit = f"Custom: {custom[:50]}"
-            items = [i.strip() for i in custom.split(',')]
-            user.outfit_items = json.dumps(items[:6])
-            session.commit()
-            await update.message.reply_text("✅ Outfit saved. Use /wherenow!")
+        if not user or not user.awaiting_custom_outfit:
+            return  # Not awaiting, let chat_handler take it
+        
+        # Clear flag in DB first
+        user.awaiting_custom_outfit = False
+        
+        custom = update.message.text
+        user.current_outfit = f"Custom: {custom[:50]}"
+        items = [i.strip() for i in custom.split(',')]
+        user.outfit_items = json.dumps(items[:6])
+        session.commit()
+        
+        await update.message.reply_text("✅ Outfit saved. Use /wherenow!")
     finally:
         session.close()
 
@@ -841,7 +856,14 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ctx_type = query.data.replace("ctx_", "")
     
     if ctx_type == "custom":
-        context.user_data['awaiting_custom_location'] = True
+        session = get_session()
+        try:
+            user = session.query(UserState).filter_by(user_id=user_id).first()
+            if user:
+                user.awaiting_custom_location = True  # Store in DB
+                session.commit()
+        finally:
+            session.close()
         await query.edit_message_text("Describe exactly where you are:")
         return
     
@@ -912,30 +934,29 @@ async def privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_custom_location'):
-        return
-    
-    # Clear flag FIRST
-    context.user_data['awaiting_custom_location'] = False
-    
     user_id = update.effective_user.id
-    location = update.message.text
     
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if user:
-            user.custom_location = location[:100]
-            user.location = "Custom"
-            session.commit()
-            
-            keyboard = [
-                [InlineKeyboardButton("🧍 Alone", callback_data="present_alone")],
-                [InlineKeyboardButton("💑 Partner", callback_data="present_partner")],
-                [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")],
-                [InlineKeyboardButton("👥 Public", callback_data="present_public")]
-            ]
-            await update.message.reply_text(f"📍 {location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
+        if not user or not user.awaiting_custom_location:
+            return
+        
+        # Clear flag in DB first
+        user.awaiting_custom_location = False
+        
+        location = update.message.text
+        user.custom_location = location[:100]
+        user.location = "Custom"
+        session.commit()
+        
+        keyboard = [
+            [InlineKeyboardButton("🧍 Alone", callback_data="present_alone")],
+            [InlineKeyboardButton("💑 Partner", callback_data="present_partner")],
+            [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")],
+            [InlineKeyboardButton("👥 Public", callback_data="present_public")]
+        ]
+        await update.message.reply_text(f"📍 {location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
@@ -1089,6 +1110,9 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Use /start first")
             return
         
+        user.awaiting_interval = True  # Store in DB
+        session.commit()
+        
         current_min = user.min_interval
         current_max = user.max_interval
         
@@ -1099,50 +1123,48 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Examples: '30 60' or '60 120'\n\n"
             f"Send 'cancel' to keep current."
         )
-        context.user_data['awaiting_interval'] = True
     finally:
         session.close()
 
 async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_interval'):
-        return
+    user_id = update.effective_user.id
     
-    text = update.message.text.strip().lower()
-    
-    if text == 'cancel':
-        await update.message.reply_text("Interval unchanged.")
-        context.user_data['awaiting_interval'] = False
-        return
-    
+    session = get_session()
     try:
-        parts = text.split()
-        if len(parts) != 2:
-            raise ValueError("Need 2 numbers")
-        
-        min_int = int(parts[0])
-        max_int = int(parts[1])
-        
-        if min_int < 5 or max_int > 1440 or min_int >= max_int:
-            await update.message.reply_text("❌ Invalid range. Min 5-1440, max > min.")
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        if not user or not user.awaiting_interval:
             return
         
-        user_id = update.effective_user.id
-        session = get_session()
+        text = update.message.text.strip().lower()
+        
+        if text == 'cancel':
+            user.awaiting_interval = False
+            session.commit()
+            await update.message.reply_text("Interval unchanged.")
+            return
+        
         try:
-            user = session.query(UserState).filter_by(user_id=user_id).first()
-            if user:
-                user.min_interval = min_int
-                user.max_interval = max_int
-                session.commit()
-                await update.message.reply_text(f"✅ Interval: {min_int}-{max_int} minutes")
-        finally:
-            session.close()
+            parts = text.split()
+            if len(parts) != 2:
+                raise ValueError("Need 2 numbers")
             
-    except ValueError:
-        await update.message.reply_text("❌ Invalid format. Send as: MIN MAX")
-        return
-    
-    context.user_data['awaiting_interval'] = False
+            min_int = int(parts[0])
+            max_int = int(parts[1])
+            
+            if min_int < 5 or max_int > 1440 or min_int >= max_int:
+                await update.message.reply_text("❌ Invalid range. Min 5-1440, max > min.")
+                return
+            
+            user.min_interval = min_int
+            user.max_interval = max_int
+            user.awaiting_interval = False
+            session.commit()
+            await update.message.reply_text(f"✅ Interval: {min_int}-{max_int} minutes")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid format. Send as: MIN MAX")
+    finally:
+        session.close()
 
 # ============ TASK COMMANDS ============
 async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1845,7 +1867,7 @@ def main():
     # Photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
-    # CUSTOM INPUT HANDLERS - ADD THESE HERE (before chat_handler)
+    # CUSTOM INPUT HANDLERS
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_outfit))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_location))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input))
