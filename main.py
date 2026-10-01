@@ -29,7 +29,6 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 
-# Cloudinary Configuration
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
     api_key=os.getenv('CLOUDINARY_API_KEY'),
@@ -154,36 +153,21 @@ def get_session():
 
 # ============ CLOUDINARY HELPERS ============
 async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', folder='telegram_bot'):
-    """Upload image to Cloudinary and return result dict"""
     try:
         if isinstance(image_bytes, (bytes, bytearray)):
             image_bytes = BytesIO(image_bytes)
-        
         image_bytes.seek(0)
-        
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         public_id = f"{folder}/user_{user_id}/{image_type}_{timestamp}_{random.randint(1000, 9999)}"
-        
         result = cloudinary.uploader.upload(
             image_bytes,
             public_id=public_id,
             resource_type="image",
-            context={
-                'user_id': str(user_id),
-                'image_type': image_type,
-                'uploaded_at': str(datetime.now(timezone.utc))
-            },
+            context={'user_id': str(user_id), 'image_type': image_type, 'uploaded_at': str(datetime.now(timezone.utc))},
             tags=[f"user_{user_id}", image_type, "telegram_bot"]
         )
-        
         logger.info(f"Cloudinary upload success: {result.get('public_id')}")
-        return {
-            'url': result.get('secure_url'),
-            'public_id': result.get('public_id'),
-            'width': result.get('width'),
-            'height': result.get('height')
-        }
-        
+        return {'url': result.get('secure_url'), 'public_id': result.get('public_id'), 'width': result.get('width'), 'height': result.get('height')}
     except Exception as e:
         logger.error(f"Cloudinary upload error: {e}")
         return None
@@ -198,47 +182,24 @@ RISK_LEVELS = {
 }
 
 RISK_INSPIRATION = {
-    "Hotel": {
-        3: ["room with curtains open", "balcony", "near window"],
-        4: ["room doorway", "connecting door area", "bathroom with door cracked"],
-        5: ["hallway", "stairwell", "elevator lobby", "ice machine room"]
-    },
-    "Home": {
-        3: ["bedroom with door open", "near window", "garage"],
-        4: ["front porch", "backyard", "garage with door open", "living room"],
-        5: ["driveway", "apartment hallway", "shared laundry room"]
-    },
-    "Retail Store": {
-        3: ["dressing room", "back corner"],
-        4: ["fitting room with curtain", "employee hallway"],
-        5: ["parking lot", "loading dock", "alley behind store"]
-    },
-    "Vehicle": {
-        3: ["parked in empty lot", "back seat"],
-        4: ["parked near others", "rest stop"],
-        5: ["busy parking lot", "gas station", "highway rest area"]
-    },
-    "Work": {
-        3: ["private office", "bathroom stall"],
-        4: ["empty conference room", "stairwell"],
-        5: ["parking garage", "rooftop", "elevator"]
-    }
+    "Hotel": {3: ["room with curtains open", "balcony", "near window"], 4: ["room doorway", "connecting door area", "bathroom with door cracked"], 5: ["hallway", "stairwell", "elevator lobby", "ice machine room"]},
+    "Home": {3: ["bedroom with door open", "near window", "garage"], 4: ["front porch", "backyard", "garage with door open", "living room"], 5: ["driveway", "apartment hallway", "shared laundry room"]},
+    "Retail Store": {3: ["dressing room", "back corner"], 4: ["fitting room with curtain", "employee hallway"], 5: ["parking lot", "loading dock", "alley behind store"]},
+    "Vehicle": {3: ["parked in empty lot", "back seat"], 4: ["parked near others", "rest stop"], 5: ["busy parking lot", "gas station", "highway rest area"]},
+    "Work": {3: ["private office", "bathroom stall"], 4: ["empty conference room", "stairwell"], 5: ["parking garage", "rooftop", "elevator"]}
 }
 
 def get_risk_inspiration(location, risk_level):
     if risk_level < 3:
         return ""
-    
     location_key = None
     location_lower = (location or "").lower()
     for key in RISK_INSPIRATION:
         if key.lower() in location_lower:
             location_key = key
             break
-    
     if not location_key:
         location_key = "Home"
-    
     examples = RISK_INSPIRATION.get(location_key, {}).get(risk_level, [])
     if examples:
         return f" (inspiration: {', '.join(examples[:2])})"
@@ -269,11 +230,7 @@ KINK_CATEGORIES = {
     "kink_social_media": ("📱 Social Media", "Online exposure")
 }
 
-KINK_LEVELS = {
-    "no": {"emoji": "❌", "name": "No", "desc": "Hard limit"},
-    "okay": {"emoji": "⭕", "name": "Okay", "desc": "Allowed"},
-    "yes": {"emoji": "✅", "name": "Yes", "desc": "Desired"}
-}
+KINK_LEVELS = {"no": {"emoji": "❌", "name": "No", "desc": "Hard limit"}, "okay": {"emoji": "⭕", "name": "Okay", "desc": "Allowed"}, "yes": {"emoji": "✅", "name": "Yes", "desc": "Desired"}}
 
 OUTFIT_OPTIONS = {
     "casual": {"emoji": "👕", "name": "Casual", "male_items": ["t-shirt", "jeans", "boxers"], "female_items": ["t-shirt", "leggings", "panties"]},
@@ -301,57 +258,14 @@ CONTEXT_OPTIONS = {
     "public": {"emoji": "👥", "name": "Public/Strangers", "bonus": 0}
 }
 
-AVATAR_GENDERS = {
-    "male": {"emoji": "👨", "name": "Male", "desc": "Masculine, muscular or slim"},
-    "female": {"emoji": "👩", "name": "Female", "desc": "Feminine, curvy or slim"},
-    "trans": {"emoji": "⚧", "name": "Trans/Futa", "desc": "Feminine with penis and breasts"}
-}
+AVATAR_GENDERS = {"male": {"emoji": "👨", "name": "Male", "desc": "Masculine, muscular or slim"}, "female": {"emoji": "👩", "name": "Female", "desc": "Feminine, curvy or slim"}, "trans": {"emoji": "⚧", "name": "Trans/Futa", "desc": "Feminine with penis and breasts"}}
+AVATAR_RACES = {"white": {"emoji": "🏻", "name": "White/Caucasian"}, "black": {"emoji": "🏿", "name": "Black/African"}, "asian": {"emoji": "🌸", "name": "Asian"}, "hispanic": {"emoji": "🌶️", "name": "Hispanic/Latino"}, "middle_eastern": {"emoji": "🕌", "name": "Middle Eastern"}, "indian": {"emoji": "🪷", "name": "Indian/South Asian"}}
+AVATAR_BUILDS = {"slim": {"emoji": "🧍", "name": "Slim", "desc": "extremely skinny, petite, waif-like"}, "athletic": {"emoji": "💪", "name": "Athletic", "desc": "fit, toned, muscular"}, "curvy": {"emoji": "🍑", "name": "Curvy", "desc": "full figured, wide hips"}, "muscular": {"emoji": "🏋️", "name": "Muscular", "desc": "ripped, bodybuilder"}}
+AVATAR_HAIR = {"blonde": "Blonde", "brunette": "Brunette", "black": "Black", "red": "Red", "pink": "Pink", "blue": "Blue", "purple": "Purple", "white": "White/Silver"}
+AVATAR_SIZES = {"small": {"emoji": "🔹", "name": "Small", "male": "small penis", "female": "small breasts", "trans": "small breasts and penis"}, "medium": {"emoji": "🔸", "name": "Medium", "male": "medium penis", "female": "medium breasts", "trans": "medium breasts and penis"}, "large": {"emoji": "🔶", "name": "Large", "male": "large penis", "female": "large breasts", "trans": "large breasts and penis"}}
 
-AVATAR_RACES = {
-    "white": {"emoji": "🏻", "name": "White/Caucasian"},
-    "black": {"emoji": "🏿", "name": "Black/African"},
-    "asian": {"emoji": "🌸", "name": "Asian"},
-    "hispanic": {"emoji": "🌶️", "name": "Hispanic/Latino"},
-    "middle_eastern": {"emoji": "🕌", "name": "Middle Eastern"},
-    "indian": {"emoji": "🪷", "name": "Indian/South Asian"}
-}
-
-AVATAR_BUILDS = {
-    "slim": {"emoji": "🧍", "name": "Slim", "desc": "extremely skinny, petite, waif-like"},
-    "athletic": {"emoji": "💪", "name": "Athletic", "desc": "fit, toned, muscular"},
-    "curvy": {"emoji": "🍑", "name": "Curvy", "desc": "full figured, wide hips"},
-    "muscular": {"emoji": "🏋️", "name": "Muscular", "desc": "ripped, bodybuilder"}
-}
-
-AVATAR_HAIR = {
-    "blonde": "Blonde", "brunette": "Brunette", "black": "Black",
-    "red": "Red", "pink": "Pink", "blue": "Blue", "purple": "Purple", "white": "White/Silver"
-}
-
-AVATAR_SIZES = {
-    "small": {"emoji": "🔹", "name": "Small", "male": "small penis", "female": "small breasts", "trans": "small breasts and penis"},
-    "medium": {"emoji": "🔸", "name": "Medium", "male": "medium penis", "female": "medium breasts", "trans": "medium breasts and penis"},
-    "large": {"emoji": "🔶", "name": "Large", "male": "large penis", "female": "large breasts", "trans": "large breasts and penis"}
-}
-
-DOMINANT_POSES = [
-    "standing with hands on hips, dominant stance",
-    "sitting on throne-like chair, legs spread, commanding",
-    "holding riding crop, stern expression",
-    "crossed arms, looking down at camera, powerful",
-    "holding leash, dominant posture",
-    "standing over camera angle, feet visible, superior pose",
-    "holding whip behind back, confident stance",
-    "one foot on chair, elbow on knee, dominant",
-    "finger pointing down, commanding gesture",
-    "holding collar and leash, expectant expression"
-]
-
-DOMINANT_OUTFITS = [
-    "latex catsuit", "leather corset and thigh boots", "dominatrix outfit with gloves",
-    "sheer bodysuit with harness", "pvc dress with choker", "fishnet bodysuit with straps",
-    "leather harness and panties", "lace lingerie with garter belt", "shiny metallic bikini", "strappy harness outfit"
-]
+DOMINANT_POSES = ["standing with hands on hips, dominant stance", "sitting on throne-like chair, legs spread, commanding", "holding riding crop, stern expression", "crossed arms, looking down at camera, powerful", "holding leash, dominant posture", "standing over camera angle, feet visible, superior pose", "holding whip behind back, confident stance", "one foot on chair, elbow on knee, dominant", "finger pointing down, commanding gesture", "holding collar and leash, expectant expression"]
+DOMINANT_OUTFITS = ["latex catsuit", "leather corset and thigh boots", "dominatrix outfit with gloves", "sheer bodysuit with harness", "pvc dress with choker", "fishnet bodysuit with straps", "leather harness and panties", "lace lingerie with garter belt", "shiny metallic bikini", "strappy harness outfit"]
 
 # ============ HELPERS ============
 def get_user_kinks(user, level=None):
@@ -370,15 +284,7 @@ def get_title(avatar_gender):
 async def generate_ai_response(prompt, temperature=0.9):
     try:
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {
-            "model": "claude-opus-4-8-fast",
-            "messages": [
-                {"role": "system", "content": "You are a playful but demanding Domme. Speak with confidence, occasional teasing, and personality. Be conversational, use pet names, mix encouragement with demands."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": temperature,
-            "max_tokens": 500
-        }
+        data = {"model": "claude-opus-4-8-fast", "messages": [{"role": "system", "content": "You are a playful but demanding Domme. Speak with confidence, occasional teasing, and personality. Be conversational, use pet names, mix encouragement with demands."}, {"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": 500}
         response = requests.post(f"{VENICE_API_URL}/chat/completions", headers=headers, json=data, timeout=30)
         if response.status_code == 200:
             return response.json()['choices'][0]['message']['content']
@@ -392,31 +298,8 @@ async def analyze_image(image_bytes, task_desc):
     try:
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
         image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-        
-        prompt = f"""Task: {task_desc}
-
-Verify this photo. Be REASONABLE about:
-- Selfie angles (can't see own face/back in selfie)
-- Lighting and shadows  
-- Equivalent items (any clamp = clothespin, any tie = rope, etc.)
-
-Does this show completion? Reply:
-VERIFIED: yes/no
-REASON: brief
-
-Be lenient - if effort was made, verify yes."""
-        
-        data = {
-            "model": "claude-opus-4-8-fast",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                ]
-            }],
-            "max_tokens": 200
-        }
+        prompt = f"""Task: {task_desc}\n\nVerify this photo. Be REASONABLE about:\n- Selfie angles (can't see own face/back in selfie)\n- Lighting and shadows  \n- Equivalent items (any clamp = clothespin, any tie = rope, etc.)\n\nDoes this show completion? Reply:\nVERIFIED: yes/no\nREASON: brief\n\nBe lenient - if effort was made, verify yes."""
+        data = {"model": "claude-opus-4-8-fast", "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}], "max_tokens": 200}
         response = requests.post(f"{VENICE_API_URL}/chat/completions", headers=headers, json=data, timeout=30)
         if response.status_code == 200:
             return response.json()['choices'][0]['message']['content']
@@ -434,35 +317,26 @@ async def generate_task_text(user, session=None):
     outfit_items = json.loads(user.outfit_items or '[]')
     gender = user.gender or "nonbinary"
     max_risk = user.risk_level or 1
-    
     location = user.custom_location or user.location or "Unknown"
     others = user.context_others or "alone"
     privacy = user.context_privacy or "private"
-    
     actual_risk = random.randint(1, max_risk)
-    
     if others == "kids":
         actual_risk = min(2, actual_risk)
         max_risk = min(2, max_risk)
-    
     items_text = ", ".join(outfit_items) if outfit_items else "clothing"
     guide = GENDER_GUIDELINES.get(gender, GENDER_GUIDELINES["nonbinary"])
     body_parts = ", ".join(guide["body_parts"])
     cannot = ", ".join(guide.get("cannot", [])) if guide.get("cannot") else "none"
-    
     yes_kinks = get_user_kinks(user, "yes")
     okay_kinks = get_user_kinks(user, "okay")
-    
     forbidden_kinks = []
     for k in KINK_CATEGORIES.keys():
         if getattr(user, k, "no") == "no":
             forbidden_kinks.append(k.replace("kink_", ""))
-    
     all_allowed = yes_kinks + okay_kinks
-    
     if not all_allowed:
         return f"Strip completely at {location} and take a photo."
-    
     selected_kinks = []
     if yes_kinks:
         selected_kinks.append(random.choice(yes_kinks))
@@ -470,118 +344,61 @@ async def generate_task_text(user, session=None):
             remaining_yes = [k for k in yes_kinks if k not in selected_kinks]
             if remaining_yes:
                 selected_kinks.append(random.choice(remaining_yes))
-    
     remaining_slots = random.randint(1, 3) - len(selected_kinks)
     if remaining_slots > 0 and okay_kinks:
         available_okay = [k for k in okay_kinks if k not in selected_kinks]
         if available_okay:
             selected_kinks.extend(random.sample(available_okay, min(remaining_slots, len(available_okay))))
-    
     user.last_kinks_used = json.dumps(selected_kinks[-4:])
     if session:
         session.commit()
-    
     risk_desc = RISK_LEVELS[actual_risk]["description"]
     risk_inspiration = get_risk_inspiration(location, actual_risk) if actual_risk >= 3 else ""
-    
     yes_text = f"\nDESIRED: {', '.join(yes_kinks)}" if yes_kinks else ""
     selected_text = f"\nUSE: {', '.join(selected_kinks)}"
     forbidden_text = f"\n\nNEVER: {', '.join(forbidden_kinks)}" if forbidden_kinks else ""
-    
-    prompt = f"""Create ONE BDSM task for a {gender} sub.
-
-Location: {location}
-Context: {others}, {privacy} privacy
-Max Risk Level: {max_risk}/5 (user allows up to this level)
-This Task Risk: {actual_risk}/5 - {risk_desc}{risk_inspiration}
-Outfit: {user.current_outfit}
-Items: {items_text}
-Body parts: {body_parts}{yes_text}{selected_text}{forbidden_text}
-
-Rules:
-- Single action, photo proof required
-- No time durations
-- Never use forbidden kinks
-- Be creative and unpredictable
-- Risk 3-5: Consider windows, doorways, visibility, shared spaces
-- Risk 4-5: Can include immediate exterior areas, hallways, stairwells
-- Use the risk level as creative inspiration, not a requirement
-- Vary the intensity - sometimes mild, sometimes pushing boundaries
-
-Task:"""
-    
+    prompt = f"""Create ONE BDSM task for a {gender} sub.\n\nLocation: {location}\nContext: {others}, {privacy} privacy\nMax Risk Level: {max_risk}/5 (user allows up to this level)\nThis Task Risk: {actual_risk}/5 - {risk_desc}{risk_inspiration}\nOutfit: {user.current_outfit}\nItems: {items_text}\nBody parts: {body_parts}{yes_text}{selected_text}{forbidden_text}\n\nRules:\n- Single action, photo proof required\n- No time durations\n- Never use forbidden kinks\n- Be creative and unpredictable\n- Risk 3-5: Consider windows, doorways, visibility, shared spaces\n- Risk 4-5: Can include immediate exterior areas, hallways, stairwells\n- Use the risk level as creative inspiration, not a requirement\n- Vary the intensity - sometimes mild, sometimes pushing boundaries\n\nTask:"""
     response = await generate_ai_response(prompt, temperature=0.95)
-    
     if response:
         response = response.strip()
-        
-        forbidden_keywords = {
-            "marking": ["write", "marker", "sharpie", "draw on", "body writing", "written", "label"],
-            "watersports": ["pee", "piss", "urine", "wet yourself"],
-            "breathplay": ["choke", "strangle", "suffocate"],
-            "social_media": ["post", "upload", "instagram", "twitter", "facebook", "share online"]
-        }
-        
+        forbidden_keywords = {"marking": ["write", "marker", "sharpie", "draw on", "body writing", "written", "label"], "watersports": ["pee", "piss", "urine", "wet yourself"], "breathplay": ["choke", "strangle", "suffocate"], "social_media": ["post", "upload", "instagram", "twitter", "facebook", "share online"]}
         for forbidden_kink, keywords in forbidden_keywords.items():
             if forbidden_kink in forbidden_kinks:
                 if any(kw in response.lower() for kw in keywords):
                     logger.warning(f"Filtered forbidden kink '{forbidden_kink}'")
                     return await generate_task_text(user, session)
-        
         return response
-    
-    fallbacks = {
-        1: f"Strip completely at {location} and photograph your reflection",
-        2: f"Strip at {location} near the unlocked door and take a photo",
-        3: f"Expose yourself at {location} near a window and photograph the view",
-        4: f"Step just outside {location} doorway, expose yourself, and take a photo",
-        5: f"Walk to the end of the {location} hallway, expose yourself briefly, photograph the empty hall behind you"
-    }
+    fallbacks = {1: f"Strip completely at {location} and photograph your reflection", 2: f"Strip at {location} near the unlocked door and take a photo", 3: f"Expose yourself at {location} near a window and photograph the view", 4: f"Step just outside {location} doorway, expose yourself, and take a photo", 5: f"Walk to the end of the {location} hallway, expose yourself briefly, photograph the empty hall behind you"}
     return fallbacks.get(actual_risk, fallbacks[1])
 
 # ============ AVATAR ============
 async def generate_avatar_pose(user, pose_type="dominant"):
-    """Generate avatar and return bytes"""
     try:
         gender = user.avatar_gender or user.gender or "female"
         race = user.avatar_race or "white"
         build = user.avatar_build or "curvy"
         hair = user.avatar_hair or "black"
         size = user.avatar_genital_size or "medium"
-        
         race_desc = AVATAR_RACES.get(race, AVATAR_RACES["white"])["name"].split('/')[0]
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
-        
         if pose_type == "reward":
             prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, high quality, detailed skin"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
             prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, high quality"
-        
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {
-            "model": "chroma",
-            "prompt": prompt,
-            "width": 512,
-            "height": 768,
-            "seed": random.randint(1, 1000000)
-        }
-        
+        data = {"model": "chroma", "prompt": prompt, "width": 512, "height": 768, "seed": random.randint(1, 1000000)}
         logger.info(f"Generating image with prompt: {prompt[:100]}...")
         response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
-        
         logger.info(f"Image API status: {response.status_code}")
-        
         if response.status_code == 200:
             result = response.json()
             logger.info(f"Response keys: {result.keys()}")
-            
             if 'images' in result and result['images']:
                 image_data = result['images'][0]
                 logger.info(f"Image data type: {type(image_data)}, starts with: {str(image_data)[:50]}")
-                
                 if isinstance(image_data, str) and image_data.startswith('http'):
                     img_response = requests.get(image_data, timeout=30)
                     if img_response.status_code == 200:
@@ -606,10 +423,8 @@ async def generate_avatar_pose(user, pose_type="dominant"):
                 elif isinstance(image_data, bytes):
                     logger.info(f"Got bytes directly: {len(image_data)} bytes")
                     return image_data
-        
         logger.error(f"Image API error: {response.status_code} - {response.text[:200]}")
         return None
-        
     except Exception as e:
         logger.error(f"Avatar error: {e}")
         import traceback
@@ -617,28 +432,19 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         return None
 
 async def send_avatar_photo(context, chat_id, image_bytes, caption):
-    """Helper to send avatar photo from bytes"""
     try:
         if not image_bytes or len(image_bytes) < 1000:
             logger.error(f"Invalid image bytes: {len(image_bytes) if image_bytes else 'None'}")
             return False
-        
         header = image_bytes[:20]
         is_jpeg = header.startswith(b'\xff\xd8')
         is_png = header.startswith(b'\x89PNG')
-        
         if not (is_jpeg or is_png):
             logger.error(f"Invalid image format. Header: {header[:10]}")
             return False
-        
         buf = BytesIO(image_bytes)
         buf.seek(0)
-        
-        await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=buf,
-            caption=caption
-        )
+        await context.bot.send_photo(chat_id=chat_id, photo=buf, caption=caption)
         logger.info(f"Photo sent successfully: {len(image_bytes)} bytes")
         return True
     except Exception as e:
@@ -649,52 +455,33 @@ async def send_avatar_photo(context, chat_id, image_bytes, caption):
 
 # ============ CHAT HANDLER ============
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Respond to regular messages conversationally"""
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval):
-            logger.info(f"chat_handler: skipping due to awaiting flags - outfit={user.awaiting_custom_outfit}, location={user.awaiting_custom_location}, interval={user.awaiting_interval}")
+        is_awaiting = user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval)
+        logger.info(f"chat_handler check: user={user is not None}, awaiting_flags={is_awaiting}")
+        if is_awaiting:
+            logger.info("chat_handler: SKIPPING (awaiting input)")
             return
     finally:
         session.close()
-    
     message_text = update.message.text
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         title = get_title(user.avatar_gender if user else None)
-        
         context_info = ""
         if user:
             context_info = f"User is {user.gender or 'unknown'}, wearing {user.current_outfit or 'unknown'}, at {user.custom_location or 'unknown'}. "
             context_info += f"They have {user.points} points, streak {user.streak}. "
-        
-        prompt = f"""You are a dominant {title}. Respond to this message from your submissive briefly (1-2 sentences). Be playful but commanding, use pet names.
-
-{context_info}
-
-Their message: "{message_text}"
-
-Respond as {title}:"""
-        
+        prompt = f"""You are a dominant {title}. Respond to this message from your submissive briefly (1-2 sentences). Be playful but commanding, use pet names.\n\n{context_info}\n\nTheir message: "{message_text}"\n\nRespond as {title}:"""
         response = await generate_ai_response(prompt, temperature=0.9)
-        
         if response:
             await update.message.reply_text(response.strip())
         else:
-            fallbacks = [
-                f"Mmm? Speak up, pet.",
-                f"Is that how you address {title}?",
-                f"You're distracting me, toy.",
-                f"Save your words and show me action instead.",
-                f"Interesting. Now get back to your task."
-            ]
+            fallbacks = [f"Mmm? Speak up, pet.", f"Is that how you address {title}?", f"You're distracting me, toy.", f"Save your words and show me action instead.", f"Interesting. Now get back to your task."]
             await update.message.reply_text(random.choice(fallbacks))
-            
     finally:
         session.close()
 
@@ -702,7 +489,6 @@ Respond as {title}:"""
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "sub"
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -710,47 +496,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = UserState(user_id=user_id, username=username)
             session.add(user)
             session.commit()
-            
-            keyboard = [
-                [InlineKeyboardButton("👨 Male", callback_data="gender_male")],
-                [InlineKeyboardButton("👩 Female", callback_data="gender_female")],
-                [InlineKeyboardButton("⚧ Trans", callback_data="gender_trans")],
-                [InlineKeyboardButton("🌈 Non-binary", callback_data="gender_nonbinary")]
-            ]
+            keyboard = [[InlineKeyboardButton("👨 Male", callback_data="gender_male")], [InlineKeyboardButton("👩 Female", callback_data="gender_female")], [InlineKeyboardButton("⚧ Trans", callback_data="gender_trans")], [InlineKeyboardButton("🌈 Non-binary", callback_data="gender_nonbinary")]]
             await update.message.reply_text(f"Welcome, {username}. Select gender:", reply_markup=InlineKeyboardMarkup(keyboard))
             return
-        
         loc = user.custom_location or user.location or "Not set"
         yes_count = len(get_user_kinks(user, "yes"))
         okay_count = len(get_user_kinks(user, "okay"))
-        
-        await update.message.reply_text(
-            f"Welcome back, {username}!\n\n"
-            f"📍 Location: {loc}\n"
-            f"Risk: {user.risk_level} | Points: {user.points}\n"
-            f"Streak: {user.streak}\n"
-            f"Kinks: {yes_count} desired, {okay_count} allowed\n\n"
-            f"/task - Get challenge\n"
-            f"/wherenow - Set location\n"
-            f"/outfit - Set clothing\n"
-            f"/avatar - Create avatar\n"
-            f"/risk - Set risk\n"
-            f"/kinks - Set kink preferences\n"
-            f"/interval - Set auto-task interval\n"
-            f"/schedule - Auto-tasks on/off\n"
-            f"/status - Check task\n"
-            f"/rewards - Check reward progress"
-        )
+        await update.message.reply_text(f"Welcome back, {username}!\n\n📍 Location: {loc}\nRisk: {user.risk_level} | Points: {user.points}\nStreak: {user.streak}\nKinks: {yes_count} desired, {okay_count} allowed\n\n/task - Get challenge\n/wherenow - Set location\n/outfit - Set clothing\n/avatar - Create avatar\n/risk - Set risk\n/kinks - Set kink preferences\n/interval - Set auto-task interval\n/schedule - Auto-tasks on/off\n/status - Check task\n/rewards - Check reward progress")
+    finally:
+        session.close()
+
+async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test if handlers are working"""
+    user_id = update.effective_user.id
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        if user:
+            await update.message.reply_text(f"✅ Bot is working!\n\nawaiting_custom_outfit: {user.awaiting_custom_outfit}\nawaiting_custom_location: {user.awaiting_custom_location}\nawaiting_interval: {user.awaiting_interval}\n\ncustom_location: {user.custom_location or 'Not set'}")
+        else:
+            await update.message.reply_text("No user record found")
     finally:
         session.close()
 
 async def gender_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("👨 Male", callback_data="gender_male")],
-        [InlineKeyboardButton("👩 Female", callback_data="gender_female")],
-        [InlineKeyboardButton("⚧ Trans", callback_data="gender_trans")],
-        [InlineKeyboardButton("🌈 Non-binary", callback_data="gender_nonbinary")]
-    ]
+    keyboard = [[InlineKeyboardButton("👨 Male", callback_data="gender_male")], [InlineKeyboardButton("👩 Female", callback_data="gender_female")], [InlineKeyboardButton("⚧ Trans", callback_data="gender_trans")], [InlineKeyboardButton("🌈 Non-binary", callback_data="gender_nonbinary")]]
     await update.message.reply_text("Select gender:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def gender_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -758,7 +528,6 @@ async def gender_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     gender = query.data.replace("gender_", "")
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -778,7 +547,6 @@ async def outfit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user or not user.gender:
             await update.message.reply_text("Set gender first with /gender")
             return
-        
         keyboard = [[InlineKeyboardButton(f"{o['emoji']} {o['name']}", callback_data=f"outfit_{k}")] for k, o in OUTFIT_OPTIONS.items()]
         current = user.current_outfit or "Not set"
         await update.message.reply_text(f"Current: {current}\n\nWhat are you wearing?", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -790,61 +558,48 @@ async def outfit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
     outfit_key = query.data.replace("outfit_", "")
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if not user:
             return
-        
         if outfit_key == "custom":
             user.awaiting_custom_outfit = True
             session.commit()
             logger.info(f"Set awaiting_custom_outfit=True for user {user_id}")
             await query.edit_message_text("Describe your outfit:")
             return
-        
         outfit = OUTFIT_OPTIONS[outfit_key]
         items = outfit.get(f"{user.gender}_items", outfit["male_items"])
         user.current_outfit = outfit["name"]
         user.outfit_items = json.dumps(items)
         session.commit()
-        
         await query.edit_message_text(f"{outfit['emoji']} Outfit: {outfit['name']}\n\nUse /wherenow to set location!")
     finally:
         session.close()
 
 async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+    logger.info(f"=== handle_custom_outfit TRIGGERED for user {user_id} ===")
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if not user or not user.awaiting_custom_outfit:
+            logger.info(f"handle_custom_outfit: SKIPPING (flag={user.awaiting_custom_outfit if user else 'no user'})")
             return
-        
         user.awaiting_custom_outfit = False
-        
         custom = update.message.text
         user.current_outfit = f"Custom: {custom[:50]}"
         items = [i.strip() for i in custom.split(',')]
         user.outfit_items = json.dumps(items[:6])
         session.commit()
-        
         logger.info(f"Saved custom outfit for user {user_id}: {user.current_outfit}")
         await update.message.reply_text("✅ Outfit saved. Use /wherenow!")
     finally:
         session.close()
 
 async def wherenow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🏪 Store", callback_data="ctx_store")],
-        [InlineKeyboardButton("🏠 Home", callback_data="ctx_home")],
-        [InlineKeyboardButton("🏨 Hotel", callback_data="ctx_hotel")],
-        [InlineKeyboardButton("🚗 Vehicle", callback_data="ctx_car")],
-        [InlineKeyboardButton("🏢 Work", callback_data="ctx_work")],
-        [InlineKeyboardButton("✏️ Custom", callback_data="ctx_custom")]
-    ]
+    keyboard = [[InlineKeyboardButton("🏪 Store", callback_data="ctx_store")], [InlineKeyboardButton("🏠 Home", callback_data="ctx_home")], [InlineKeyboardButton("🏨 Hotel", callback_data="ctx_hotel")], [InlineKeyboardButton("🚗 Vehicle", callback_data="ctx_car")], [InlineKeyboardButton("🏢 Work", callback_data="ctx_work")], [InlineKeyboardButton("✏️ Custom", callback_data="ctx_custom")]]
     await update.message.reply_text("📍 Where are you?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -852,9 +607,7 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
     ctx_type = query.data.replace("ctx_", "")
-    
     logger.info(f"Context callback triggered: {ctx_type} for user {user_id}")
-    
     if ctx_type == "custom":
         session = get_session()
         try:
@@ -873,10 +626,8 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         finally:
             session.close()
         return
-    
     loc_map = {"store": "Retail Store", "home": "Home", "hotel": "Hotel", "car": "Vehicle", "work": "Work"}
     location = loc_map.get(ctx_type, "Unknown")
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -887,23 +638,44 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"Set location to {location} for user {user_id}")
     finally:
         session.close()
-    
-    keyboard = [
-        [InlineKeyboardButton("🧍 Alone", callback_data="present_alone")],
-        [InlineKeyboardButton("💑 Partner", callback_data="present_partner")],
-        [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")],
-        [InlineKeyboardButton("👨‍👩‍👧 Family", callback_data="present_parents")],
-        [InlineKeyboardButton("👶 Kids", callback_data="present_kids")],
-        [InlineKeyboardButton("👥 Public", callback_data="present_public")]
-    ]
+    keyboard = [[InlineKeyboardButton("🧍 Alone", callback_data="present_alone")], [InlineKeyboardButton("💑 Partner", callback_data="present_partner")], [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")], [InlineKeyboardButton("👨‍👩‍👧 Family", callback_data="present_parents")], [InlineKeyboardButton("👶 Kids", callback_data="present_kids")], [InlineKeyboardButton("👥 Public", callback_data="present_public")]]
     await query.edit_message_text(f"📍 {location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text[:50]
+    logger.info(f"=== handle_custom_location TRIGGERED for user {user_id}, text='{text}' ===")
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        logger.info(f"User found: {user is not None}")
+        if user:
+            logger.info(f"awaiting_custom_location = {user.awaiting_custom_location}")
+        if not user:
+            logger.error(f"No user found for {user_id}")
+            return
+        if not user.awaiting_custom_location:
+            logger.info(f"awaiting_custom_location is False, skipping")
+            return
+        user.awaiting_custom_location = False
+        user.custom_location = update.message.text[:100]
+        user.location = "Custom"
+        session.commit()
+        logger.info(f"SUCCESS: Saved location '{user.custom_location}' for user {user_id}")
+        keyboard = [[InlineKeyboardButton("🧍 Alone", callback_data="present_alone")], [InlineKeyboardButton("💑 Partner", callback_data="present_partner")], [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")], [InlineKeyboardButton("👥 Public", callback_data="present_public")]]
+        await update.message.reply_text(f"📍 {user.custom_location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"ERROR in handle_custom_location: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        session.close()
 
 async def present_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
     present_type = query.data.replace("present_", "")
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -915,13 +687,7 @@ async def present_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             session.commit()
     finally:
         session.close()
-    
-    keyboard = [
-        [InlineKeyboardButton("🔒 Private", callback_data="privacy_private")],
-        [InlineKeyboardButton("🚪 Semi-private", callback_data="privacy_semi")],
-        [InlineKeyboardButton("👁️ Exposed", callback_data="privacy_exposed")],
-        [InlineKeyboardButton("🌍 Public", callback_data="privacy_public")]
-    ]
+    keyboard = [[InlineKeyboardButton("🔒 Private", callback_data="privacy_private")], [InlineKeyboardButton("🚪 Semi-private", callback_data="privacy_semi")], [InlineKeyboardButton("👁️ Exposed", callback_data="privacy_exposed")], [InlineKeyboardButton("🌍 Public", callback_data="privacy_public")]]
     ctx_name = CONTEXT_OPTIONS.get(present_type, {}).get("name", present_type)
     await query.edit_message_text(f"👥 {ctx_name}\n\nPrivacy level?", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -930,7 +696,6 @@ async def privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = update.effective_user.id
     privacy = query.data.replace("privacy_", "")
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -938,47 +703,6 @@ async def privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.context_privacy = privacy
             session.commit()
             await query.edit_message_text(f"✅ Context set!\n\nUse /kinks to set your preferences, then /task for challenges!")
-    finally:
-        session.close()
-
-async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text[:50]
-    
-    logger.info(f"handle_custom_location triggered for user {user_id}, text='{text}'")
-    
-    session = get_session()
-    try:
-        user = session.query(UserState).filter_by(user_id=user_id).first()
-        
-        logger.info(f"handle_custom_location: user={user is not None}, awaiting={user.awaiting_custom_location if user else 'N/A'}")
-        
-        if not user:
-            logger.error(f"No user found for {user_id}")
-            return
-        
-        if not user.awaiting_custom_location:
-            logger.info(f"awaiting_custom_location is False for user {user_id}, returning")
-            return
-        
-        user.awaiting_custom_location = False
-        user.custom_location = update.message.text[:100]
-        user.location = "Custom"
-        session.commit()
-        
-        logger.info(f"Saved custom location for user {user_id}: {user.custom_location}")
-        
-        keyboard = [
-            [InlineKeyboardButton("🧍 Alone", callback_data="present_alone")],
-            [InlineKeyboardButton("💑 Partner", callback_data="present_partner")],
-            [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")],
-            [InlineKeyboardButton("👥 Public", callback_data="present_public")]
-        ]
-        await update.message.reply_text(f"📍 {user.custom_location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.error(f"Error in handle_custom_location: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
     finally:
         session.close()
 
@@ -991,7 +715,6 @@ async def risk_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     risk = int(query.data.replace("risk_", ""))
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
@@ -1010,78 +733,49 @@ async def kinks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("Use /start first")
             return
-        
         keyboard = []
         for kink_key, (name, desc) in KINK_CATEGORIES.items():
             current_level = getattr(user, kink_key, "no")
             emoji = KINK_LEVELS[current_level]["emoji"]
             keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"kinkmenu_{kink_key}")])
-        
         keyboard.append([InlineKeyboardButton("🔙 Done", callback_data="kinks_done")])
-        
-        await update.message.reply_text(
-            "🎭 Kink Preferences\n\n"
-            "❌ = No (hard limit)\n"
-            "⭕ = Okay (Dom may use)\n"
-            "✅ = Yes (desired/favorite)\n\n"
-            "Tap a kink to cycle through options:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🎭 Kink Preferences\n\n❌ = No (hard limit)\n⭕ = Okay (Dom may use)\n✅ = Yes (desired/favorite)\n\nTap a kink to cycle through options:", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
 async def kink_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     kink_key = query.data.replace("kinkmenu_", "")
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if not user:
             return
-        
         current = getattr(user, kink_key, "no")
         name = KINK_CATEGORIES[kink_key][0]
         desc = KINK_CATEGORIES[kink_key][1]
-        
-        keyboard = [
-            [InlineKeyboardButton(f"{'✅' if current == 'no' else ''} ❌ No (Never)", callback_data=f"kinkset_{kink_key}_no")],
-            [InlineKeyboardButton(f"{'✅' if current == 'okay' else ''} ⭕ Okay (Dom decides)", callback_data=f"kinkset_{kink_key}_okay")],
-            [InlineKeyboardButton(f"{'✅' if current == 'yes' else ''} ✅ Yes (Desired!)", callback_data=f"kinkset_{kink_key}_yes")],
-            [InlineKeyboardButton("🔙 Back", callback_data="kinks_back")]
-        ]
-        
-        await query.edit_message_text(
-            f"{name}\n\n{desc}\n\nCurrent: {KINK_LEVELS[current]['emoji']} {KINK_LEVELS[current]['name']}\n\nSelect new level:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        keyboard = [[InlineKeyboardButton(f"{'✅' if current == 'no' else ''} ❌ No (Never)", callback_data=f"kinkset_{kink_key}_no")], [InlineKeyboardButton(f"{'✅' if current == 'okay' else ''} ⭕ Okay (Dom decides)", callback_data=f"kinkset_{kink_key}_okay")], [InlineKeyboardButton(f"{'✅' if current == 'yes' else ''} ✅ Yes (Desired!)", callback_data=f"kinkset_{kink_key}_yes")], [InlineKeyboardButton("🔙 Back", callback_data="kinks_back")]]
+        await query.edit_message_text(f"{name}\n\n{desc}\n\nCurrent: {KINK_LEVELS[current]['emoji']} {KINK_LEVELS[current]['name']}\n\nSelect new level:", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
 async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     data = query.data.replace("kinkset_", "").rsplit("_", 1)
     kink_key = data[0]
     level = data[1]
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user and hasattr(user, kink_key):
             setattr(user, kink_key, level)
             session.commit()
-            
             name = KINK_CATEGORIES[kink_key][0]
-            await query.edit_message_text(
-                f"✅ {name} set to {KINK_LEVELS[level]['emoji']} {KINK_LEVELS[level]['name']}"
-            )
-            
+            await query.edit_message_text(f"✅ {name} set to {KINK_LEVELS[level]['emoji']} {KINK_LEVELS[level]['name']}")
             await asyncio.sleep(0.5)
             await kinks_back_callback(update, context)
     finally:
@@ -1090,7 +784,6 @@ async def kink_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def kinks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user_id = update.effective_user.id
     session = get_session()
     try:
@@ -1098,23 +791,13 @@ async def kinks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not user:
             await query.edit_message_text("Use /start first")
             return
-        
         keyboard = []
         for kink_key, (name, desc) in KINK_CATEGORIES.items():
             current_level = getattr(user, kink_key, "no")
             emoji = KINK_LEVELS[current_level]["emoji"]
             keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"kinkmenu_{kink_key}")])
-        
         keyboard.append([InlineKeyboardButton("🔙 Done", callback_data="kinks_done")])
-        
-        await query.edit_message_text(
-            "🎭 Kink Preferences\n\n"
-            "❌ = No (hard limit)\n"
-            "⭕ = Okay (Dom may use)\n"
-            "✅ = Yes (desired/favorite)\n\n"
-            "Tap a kink to cycle through options:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await update.message.reply_text("🎭 Kink Preferences\n\n❌ = No (hard limit)\n⭕ = Okay (Dom may use)\n✅ = Yes (desired/favorite)\n\nTap a kink to cycle through options:", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
@@ -1131,58 +814,44 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("Use /start first")
             return
-        
         user.awaiting_interval = True
         session.commit()
-        
         current_min = user.min_interval
         current_max = user.max_interval
-        
-        await update.message.reply_text(
-            f"⏱️ Auto-Task Interval\n\n"
-            f"Current: {current_min}-{current_max} minutes\n\n"
-            f"Send new interval as: MIN MAX\n"
-            f"Examples: '30 60' or '60 120'\n\n"
-            f"Send 'cancel' to keep current."
-        )
+        await update.message.reply_text(f"⏱️ Auto-Task Interval\n\nCurrent: {current_min}-{current_max} minutes\n\nSend new interval as: MIN MAX\nExamples: '30 60' or '60 120'\n\nSend 'cancel' to keep current.")
     finally:
         session.close()
 
 async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
+    logger.info(f"=== handle_interval_input TRIGGERED for user {user_id} ===")
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if not user or not user.awaiting_interval:
+            logger.info(f"handle_interval_input: SKIPPING (flag={user.awaiting_interval if user else 'no user'})")
             return
-        
         text = update.message.text.strip().lower()
-        
         if text == 'cancel':
             user.awaiting_interval = False
             session.commit()
             await update.message.reply_text("Interval unchanged.")
             return
-        
         try:
             parts = text.split()
             if len(parts) != 2:
                 raise ValueError("Need 2 numbers")
-            
             min_int = int(parts[0])
             max_int = int(parts[1])
-            
             if min_int < 5 or max_int > 1440 or min_int >= max_int:
                 await update.message.reply_text("❌ Invalid range. Min 5-1440, max > min.")
                 return
-            
             user.min_interval = min_int
             user.max_interval = max_int
             user.awaiting_interval = False
             session.commit()
+            logger.info(f"Saved interval {min_int}-{max_int} for user {user_id}")
             await update.message.reply_text(f"✅ Interval: {min_int}-{max_int} minutes")
-                
         except ValueError:
             await update.message.reply_text("❌ Invalid format. Send as: MIN MAX")
     finally:
@@ -1206,49 +875,27 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user.custom_location:
             await wherenow_cmd(update, context)
             return
-        
         active = session.query(Task).filter_by(user_id=user_id, status="pending").first()
         if active:
             time_left = (active.expires_at - datetime.now(timezone.utc)).total_seconds() / 60
             await update.message.reply_text(f"You have a task pending! {max(0, time_left):.0f} minutes left.")
             return
-        
         await update.message.reply_text("Generating your task...")
-        
         if random.random() < 0.3 and user.avatar_gender:
             avatar_bytes = await generate_avatar_pose(user, "dominant")
             if avatar_bytes:
                 await send_avatar_photo(context, user_id, avatar_bytes, "Your task awaits...")
                 await asyncio.sleep(1)
-        
         task_text = await generate_task_text(user, session)
-        
         now = datetime.now(timezone.utc)
         expires = now + timedelta(minutes=30)
-        
         task = Task(user_id=user_id, task_text=task_text, risk_level=user.risk_level, created_at=now, expires_at=expires)
         session.add(task)
         session.commit()
-        
-        context.job_queue.run_once(
-            auto_clear_task,
-            when=expires,
-            data={'user_id': user_id, 'task_id': task.id},
-            name=f"timeout_{task.id}"
-        )
-        
+        context.job_queue.run_once(auto_clear_task, when=expires, data={'user_id': user_id, 'task_id': task.id}, name=f"timeout_{task.id}")
         title = get_title(user.avatar_gender)
-        
-        keyboard = [
-            [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
-            [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
-        ]
-        
-        await update.message.reply_text(
-            f"🎯 TASK\n\n{task_text}\n\n30 minutes.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        keyboard = [[InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")], [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")], [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]]
+        await update.message.reply_text(f"🎯 TASK\n\n{task_text}\n\n30 minutes.", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
@@ -1257,36 +904,21 @@ async def mercy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     task_id = int(query.data.replace("mercy_", ""))
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         task = session.query(Task).filter_by(id=task_id, user_id=user_id, status="pending").first()
         if not task:
             await query.edit_message_text("No active task.")
             return
-        
         user = session.query(UserState).filter_by(user_id=user_id).first()
         title = get_title(user.avatar_gender)
-        
         await query.edit_message_text(f"Mercy granted, pet. Let me find something else...")
-        
         new_task_text = await generate_task_text(user, session)
         task.task_text = new_task_text
         task.verification_attempts = 0
         session.commit()
-        
-        keyboard = [
-            [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
-            [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
-            [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
-        ]
-        
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"🔄 NEW TASK (Mercy)\n\n{new_task_text}\n\n30 minutes.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
+        keyboard = [[InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")], [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")], [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]]
+        await context.bot.send_message(chat_id=user_id, text=f"🔄 NEW TASK (Mercy)\n\n{new_task_text}\n\n30 minutes.", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
@@ -1298,33 +930,18 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("Use /start first")
             return
-        
         active = session.query(Task).filter_by(user_id=user_id, status="pending").first()
         if active:
             time_left = (active.expires_at - datetime.now(timezone.utc)).total_seconds() / 60
-            
             title = get_title(user.avatar_gender)
-            keyboard = [
-                [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{active.id}")],
-                [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{active.id}")],
-                [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{active.id}")]
-            ]
-            await update.message.reply_text(
-                f"⏰ {max(0, time_left):.0f} min left\n\n{active.task_text[:200]}...",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            keyboard = [[InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{active.id}")], [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{active.id}")], [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{active.id}")]]
+            await update.message.reply_text(f"⏰ {max(0, time_left):.0f} min left\n\n{active.task_text[:200]}...", reply_markup=InlineKeyboardMarkup(keyboard))
         else:
             loc = user.custom_location or user.location or "Not set"
             interval = f"{user.min_interval}-{user.max_interval} min" if user.scheduling_enabled else "Off"
             yes_kinks = len(get_user_kinks(user, "yes"))
             okay_kinks = len(get_user_kinks(user, "okay"))
-            await update.message.reply_text(
-                f"No active task.\n\n"
-                f"📍 {loc} | Points: {user.points} | Streak: {user.streak}\n"
-                f"Kinks: {yes_kinks} desired, {okay_kinks} allowed\n"
-                f"Auto: {interval}\n\n"
-                f"Use /task!"
-            )
+            await update.message.reply_text(f"No active task.\n\n📍 {loc} | Points: {user.points} | Streak: {user.streak}\nKinks: {yes_kinks} desired, {okay_kinks} allowed\nAuto: {interval}\n\nUse /task!")
     finally:
         session.close()
 
@@ -1336,13 +953,7 @@ async def rewards_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("Use /start first")
             return
-        
-        await update.message.reply_text(
-            f"🎁 Rewards unlock every 5-10 tasks completed.\n\n"
-            f"Current streak: {user.streak}\n"
-            f"Total completed: {user.completed_tasks}\n\n"
-            f"Keep completing tasks to earn avatar rewards!"
-        )
+        await update.message.reply_text(f"🎁 Rewards unlock every 5-10 tasks completed.\n\nCurrent streak: {user.streak}\nTotal completed: {user.completed_tasks}\n\nKeep completing tasks to earn avatar rewards!")
     finally:
         session.close()
 
@@ -1351,63 +962,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session()
     cloudinary_result = None
-    
     try:
         task = session.query(Task).filter_by(user_id=user_id, status="pending").first()
-        
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        
         await update.message.reply_text("Checking your photo...")
         photo_bytes = await file.download_as_bytearray()
-        
         if len(photo_bytes) < 1000:
             await update.message.reply_text("Photo too small. Send clearer photo.")
             return
-        
-        cloudinary_result = await upload_to_cloudinary(
-            photo_bytes, 
-            user_id, 
-            image_type='verification' if task else 'user_upload'
-        )
-        
-        user_image = UserImage(
-            user_id=user_id,
-            telegram_file_id=photo.file_id,
-            cloudinary_url=cloudinary_result['url'] if cloudinary_result else None,
-            cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None,
-            image_type='verification' if task else 'user_upload'
-        )
+        cloudinary_result = await upload_to_cloudinary(photo_bytes, user_id, image_type='verification' if task else 'user_upload')
+        user_image = UserImage(user_id=user_id, telegram_file_id=photo.file_id, cloudinary_url=cloudinary_result['url'] if cloudinary_result else None, cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None, image_type='verification' if task else 'user_upload')
         session.add(user_image)
         session.commit()
-        
         if not task:
             msg = "📸 Image saved to your collection."
             if cloudinary_result:
                 msg += f"\n☁️ Backed up to cloud."
             await update.message.reply_text(msg)
             return
-        
         now = datetime.now(timezone.utc)
         if now > task.expires_at:
             task.status = "expired"
             session.commit()
             await update.message.reply_text("Task expired. Use /task.")
             return
-        
         verification = await analyze_image(photo_bytes, task.task_text)
         verified, reason = parse_verification(verification)
         task.verification_attempts += 1
-        
         if cloudinary_result:
             task.cloudinary_url = cloudinary_result['url']
             task.cloudinary_public_id = cloudinary_result['public_id']
-        
         if verified == "yes":
             task.status = "completed"
             task.completed_at = now
             task.photo_url = photo.file_id
-            
             user = session.query(UserState).filter_by(user_id=user_id).first()
             user.points += 10 * task.risk_level
             user.streak += 1
@@ -1415,30 +1004,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.consecutive_failures = 0
             user.challenges_since_reward += 1
             session.commit()
-            
             title = get_title(user.avatar_gender)
-            
             if user.challenges_since_reward >= random.randint(5, 10):
                 user.challenges_since_reward = 0
                 session.commit()
-                
                 await update.message.reply_text(f"✅ +{10 * task.risk_level} points! Streak: {user.streak}\n\n🎁 Reward earned!")
-                
                 reward_bytes = await generate_avatar_pose(user, "reward")
                 if reward_bytes:
-                    reward_cloudinary = await upload_to_cloudinary(
-                        reward_bytes, user_id, image_type='reward'
-                    )
+                    reward_cloudinary = await upload_to_cloudinary(reward_bytes, user_id, image_type='reward')
                     await send_avatar_photo(context, user_id, reward_bytes, f"🎁 Your reward, {title} is pleased.")
-                    
                     if reward_cloudinary:
-                        reward_image = UserImage(
-                            user_id=user_id,
-                            telegram_file_id='generated',
-                            cloudinary_url=reward_cloudinary['url'],
-                            cloudinary_public_id=reward_cloudinary['public_id'],
-                            image_type='reward'
-                        )
+                        reward_image = UserImage(user_id=user_id, telegram_file_id='generated', cloudinary_url=reward_cloudinary['url'], cloudinary_public_id=reward_cloudinary['public_id'], image_type='reward')
                         session.add(reward_image)
                         session.commit()
                 else:
@@ -1453,12 +1029,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 session.commit()
                 await update.message.reply_text(f"❌ Failed: {reason}")
             else:
-                keyboard = [
-                    [InlineKeyboardButton("🔄 Try Again", callback_data=f"retry_{task.id}")],
-                    [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{task.id}")]
-                ]
+                keyboard = [[InlineKeyboardButton("🔄 Try Again", callback_data=f"retry_{task.id}")], [InlineKeyboardButton("❌ Give Up", callback_data=f"giveup_{task.id}")]]
                 await update.message.reply_text(f"❌ {reason}\n\n1 try left.", reply_markup=InlineKeyboardMarkup(keyboard))
-        
         session.commit()
     except Exception as e:
         logger.error(f"Photo error: {e}")
@@ -1476,7 +1048,6 @@ async def giveup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     task_id = int(query.data.replace("giveup_", ""))
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         task = session.query(Task).filter_by(id=task_id, user_id=user_id).first()
@@ -1499,14 +1070,12 @@ async def auto_clear_task(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data['user_id']
     task_id = job_data['task_id']
-    
     logger.info(f"Timeout task {task_id}")
     session = get_session()
     try:
         task = session.query(Task).filter_by(id=task_id).first()
         if not task or task.status != "pending":
             return
-        
         task.status = "expired"
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
@@ -1514,7 +1083,6 @@ async def auto_clear_task(context: ContextTypes.DEFAULT_TYPE):
             user.streak = 0
             user.consecutive_failures += 1
             session.commit()
-            
             try:
                 await context.bot.send_message(chat_id=user_id, text="⏰ Task expired. -10 points.")
             except Exception as e:
@@ -1534,11 +1102,7 @@ async def avatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user:
             await update.message.reply_text("Use /start first")
             return
-        
-        keyboard = [
-            [InlineKeyboardButton(f"{g['emoji']} {g['name']}", callback_data=f"av_gender_{k}")]
-            for k, g in AVATAR_GENDERS.items()
-        ]
+        keyboard = [[InlineKeyboardButton(f"{g['emoji']} {g['name']}", callback_data=f"av_gender_{k}")] for k, g in AVATAR_GENDERS.items()]
         await update.message.reply_text("🎨 Create Your Avatar\n\nStep 1/5: Select gender:", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
@@ -1548,11 +1112,7 @@ async def avatar_gender_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     gender = query.data.replace("av_gender_", "")
     context.user_data['avatar_gender'] = gender
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{r['emoji']} {r['name']}", callback_data=f"av_race_{k}")]
-        for k, r in AVATAR_RACES.items()
-    ]
+    keyboard = [[InlineKeyboardButton(f"{r['emoji']} {r['name']}", callback_data=f"av_race_{k}")] for k, r in AVATAR_RACES.items()]
     await query.edit_message_text(f"✅ Gender: {AVATAR_GENDERS[gender]['name']}\n\nStep 2/5: Select race:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def avatar_race_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1560,11 +1120,7 @@ async def avatar_race_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     race = query.data.replace("av_race_", "")
     context.user_data['avatar_race'] = race
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{b['emoji']} {b['name']}", callback_data=f"av_build_{k}")]
-        for k, b in AVATAR_BUILDS.items()
-    ]
+    keyboard = [[InlineKeyboardButton(f"{b['emoji']} {b['name']}", callback_data=f"av_build_{k}")] for k, b in AVATAR_BUILDS.items()]
     await query.edit_message_text(f"✅ Race: {AVATAR_RACES[race]['name']}\n\nStep 3/5: Select build:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def avatar_build_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1572,7 +1128,6 @@ async def avatar_build_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     build = query.data.replace("av_build_", "")
     context.user_data['avatar_build'] = build
-    
     keyboard = [[InlineKeyboardButton(h, callback_data=f"av_hair_{k}")] for k, h in AVATAR_HAIR.items()]
     await query.edit_message_text(f"✅ Build: {AVATAR_BUILDS[build]['name']}\n\nStep 4/5: Select hair:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1581,31 +1136,24 @@ async def avatar_hair_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     hair = query.data.replace("av_hair_", "")
     context.user_data['avatar_hair'] = hair
-    
     gender = context.user_data.get('avatar_gender', 'female')
     keyboard = [[InlineKeyboardButton(f"{s['emoji']} {s['name']}", callback_data=f"av_size_{k}")] for k, s in AVATAR_SIZES.items()]
-    
     size_label = "breast" if gender == "female" else "genital"
     if gender == "trans":
         size_label = "breast and penis"
-    
     await query.edit_message_text(f"✅ Hair: {AVATAR_HAIR[hair]}\n\nStep 5/5: Select {size_label} size:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     size = query.data.replace("av_size_", "")
-    
     user_id = update.effective_user.id
     gender = context.user_data.get('avatar_gender')
     race = context.user_data.get('avatar_race')
     build = context.user_data.get('avatar_build')
     hair = context.user_data.get('avatar_hair')
-    
     await query.edit_message_text("🎨 Generating avatar...")
-    
     image_bytes = await generate_avatar_pose_image(gender, race, build, hair, size)
-    
     if image_bytes:
         session = get_session()
         try:
@@ -1617,62 +1165,34 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user.avatar_hair = hair
                 user.avatar_genital_size = size
                 session.commit()
-            
-            cloudinary_result = await upload_to_cloudinary(
-                image_bytes, user_id, image_type='avatar'
-            )
-            
-            avatar = AvatarImage(
-                user_id=user_id, 
-                image_url="generated", 
-                cloudinary_url=cloudinary_result['url'] if cloudinary_result else None,
-                cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None,
-                gender=gender, 
-                race=race, 
-                build=build
-            )
+            cloudinary_result = await upload_to_cloudinary(image_bytes, user_id, image_type='avatar')
+            avatar = AvatarImage(user_id=user_id, image_url="generated", cloudinary_url=cloudinary_result['url'] if cloudinary_result else None, cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None, gender=gender, race=race, build=build)
             session.add(avatar)
             session.commit()
-            
             await query.edit_message_text("✅ Avatar generated!")
-            await send_avatar_photo(
-                context, user_id, image_bytes,
-                f"🎨 Your Avatar\nGender: {AVATAR_GENDERS[gender]['name']}\nRace: {AVATAR_RACES[race]['name']}\nBuild: {AVATAR_BUILDS[build]['name']}\nHair: {AVATAR_HAIR[hair]}\nSize: {AVATAR_SIZES[size]['name']}"
-            )
+            await send_avatar_photo(context, user_id, image_bytes, f"🎨 Your Avatar\nGender: {AVATAR_GENDERS[gender]['name']}\nRace: {AVATAR_RACES[race]['name']}\nBuild: {AVATAR_BUILDS[build]['name']}\nHair: {AVATAR_HAIR[hair]}\nSize: {AVATAR_SIZES[size]['name']}")
         finally:
             session.close()
     else:
         await query.edit_message_text("❌ Error generating avatar.")
 
 async def generate_avatar_pose_image(gender, race, build, hair, size):
-    """Generate initial avatar image"""
     try:
         gender_desc = AVATAR_GENDERS[gender]['desc']
         race_desc = AVATAR_RACES[race]['name'].split('/')[0]
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
-        
         if gender == "trans":
             prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
         else:
             prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
-        
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {
-            "model": "chroma",
-            "prompt": prompt,
-            "width": 512,
-            "height": 768,
-            "seed": random.randint(1, 1000000)
-        }
-        
+        data = {"model": "chroma", "prompt": prompt, "width": 512, "height": 768, "seed": random.randint(1, 1000000)}
         response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
-        
         if response.status_code == 200:
             result = response.json()
             if 'images' in result and result['images']:
                 image_data = result['images'][0]
-                
                 if image_data.startswith('http'):
                     img_response = requests.get(image_data, timeout=30)
                     if img_response.status_code == 200:
@@ -1685,30 +1205,23 @@ async def generate_avatar_pose_image(gender, race, build, hair, size):
                         return base64.b64decode(image_data)
                     except:
                         pass
-        
         return None
-        
     except Exception as e:
         logger.error(f"Avatar error: {e}")
         return None
 
 # ============ SCHEDULER ============
 async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("▶️ Enable", callback_data="sched_enable")],
-        [InlineKeyboardButton("⏹️ Disable", callback_data="sched_disable")]
-    ]
+    keyboard = [[InlineKeyboardButton("▶️ Enable", callback_data="sched_enable")], [InlineKeyboardButton("⏹️ Disable", callback_data="sched_disable")]]
     await update.message.reply_text("Auto-Task Scheduler:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
-    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        
         if query.data == "sched_enable":
             user.scheduling_enabled = True
             user.next_task_time = datetime.now(timezone.utc) + timedelta(minutes=random.randint(user.min_interval, user.max_interval))
@@ -1723,15 +1236,10 @@ async def schedule_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
-    """Check for scheduled tasks"""
     session = get_session()
     try:
         now = datetime.now(timezone.utc)
-        users = session.query(UserState).filter(
-            UserState.scheduling_enabled == True,
-            UserState.next_task_time <= now
-        ).all()
-        
+        users = session.query(UserState).filter(UserState.scheduling_enabled == True, UserState.next_task_time <= now).all()
         for user in users:
             active = session.query(Task).filter_by(user_id=user.user_id, status="pending").first()
             if not active:
@@ -1741,43 +1249,17 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
                         if avatar_bytes:
                             await send_avatar_photo(context, user.user_id, avatar_bytes, "Your task awaits...")
                             await asyncio.sleep(1)
-                    
                     task_text = await generate_task_text(user, session)
-                    
                     expires = now + timedelta(minutes=30)
-                    task = Task(
-                        user_id=user.user_id,
-                        task_text=task_text,
-                        risk_level=user.risk_level,
-                        created_at=now,
-                        expires_at=expires
-                    )
+                    task = Task(user_id=user.user_id, task_text=task_text, risk_level=user.risk_level, created_at=now, expires_at=expires)
                     session.add(task)
                     session.commit()
-                    
-                    context.job_queue.run_once(
-                        auto_clear_task,
-                        when=expires,
-                        data={'user_id': user.user_id, 'task_id': task.id},
-                        name=f"timeout_{task.id}"
-                    )
-                    
+                    context.job_queue.run_once(auto_clear_task, when=expires, data={'user_id': user.user_id, 'task_id': task.id}, name=f"timeout_{task.id}")
                     title = get_title(user.avatar_gender)
-                    keyboard = [
-                        [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
-                        [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")],
-                        [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]
-                    ]
-                    
-                    await context.bot.send_message(
-                        chat_id=user.user_id,
-                        text=f"🎯 AUTO TASK\n\n{task_text}\n\n30 minutes.",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                    
+                    keyboard = [[InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")], [InlineKeyboardButton("❌ I can't...", callback_data=f"giveup_{task.id}")], [InlineKeyboardButton("🙏 Mercy", callback_data=f"mercy_{task.id}")]]
+                    await context.bot.send_message(chat_id=user.user_id, text=f"🎯 AUTO TASK\n\n{task_text}\n\n30 minutes.", reply_markup=InlineKeyboardMarkup(keyboard))
                     user.next_task_time = now + timedelta(minutes=random.randint(user.min_interval, user.max_interval))
                     session.commit()
-                    
                 except Exception as e:
                     logger.error(f"Auto-task error: {e}")
     except Exception as e:
@@ -1787,20 +1269,15 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
 
 # ============ RESET ============
 async def resetowner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("⚠️ YES DELETE ALL", callback_data="reset_confirm")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="reset_cancel")]
-    ]
+    keyboard = [[InlineKeyboardButton("⚠️ YES DELETE ALL", callback_data="reset_confirm")], [InlineKeyboardButton("❌ Cancel", callback_data="reset_cancel")]]
     await update.message.reply_text("⚠️ DELETE ALL DATA?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     if query.data == "reset_cancel":
         await query.edit_message_text("Reset cancelled.")
         return
-    
     user_id = update.effective_user.id
     session = get_session()
     try:
@@ -1819,18 +1296,17 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ MAIN ============
 def main():
+    logger.info("=" * 60)
+    logger.info("BOT STARTING - VERSION WITH FULL DEBUG LOGGING")
+    logger.info("=" * 60)
+    
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Scheduled tasks using job_queue
-    application.job_queue.run_repeating(
-        scheduled_task_check,
-        interval=60,
-        first=10,
-        name="scheduled_check"
-    )
+    application.job_queue.run_repeating(scheduled_task_check, interval=60, first=10, name="scheduled_check")
     
     # Commands
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(CommandHandler("gender", gender_cmd))
     application.add_handler(CommandHandler("outfit", outfit_cmd))
     application.add_handler(CommandHandler("wherenow", wherenow_cmd))
@@ -1868,15 +1344,15 @@ def main():
     application.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
     application.add_handler(CallbackQueryHandler(mercy_callback, pattern="^mercy_"))
     
-    # Photo handler
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    # CUSTOM INPUT HANDLERS
+    # CUSTOM INPUT HANDLERS - MUST BE BEFORE PHOTO AND CHAT HANDLERS
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_outfit))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_location))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input))
     
-    # Chat handler (must be last for text)
+    # Photo handler
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    # Chat handler LAST
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
     
     logger.info("Bot starting...")
