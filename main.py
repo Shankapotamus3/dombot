@@ -107,8 +107,8 @@ class Task(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)
     photo_url = Column(Text, nullable=True)
-    cloudinary_url = Column(Text, nullable=True)  # Added for Cloudinary backup
-    cloudinary_public_id = Column(Text, nullable=True)  # Added for Cloudinary management
+    cloudinary_url = Column(Text, nullable=True)
+    cloudinary_public_id = Column(Text, nullable=True)
     verification_attempts = Column(Integer, default=0)
 
 class TaskHistory(Base):
@@ -125,8 +125,8 @@ class AvatarImage(Base):
     id = Column(BigInteger, primary_key=True)
     user_id = Column(BigInteger, nullable=False)
     image_url = Column(Text, nullable=False)
-    cloudinary_url = Column(Text, nullable=True)  # Added for Cloudinary backup
-    cloudinary_public_id = Column(Text, nullable=True)  # Added for Cloudinary management
+    cloudinary_url = Column(Text, nullable=True)
+    cloudinary_public_id = Column(Text, nullable=True)
     gender = Column(String(20))
     race = Column(String(20))
     build = Column(String(20))
@@ -139,7 +139,7 @@ class UserImage(Base):
     telegram_file_id = Column(Text, nullable=False)
     cloudinary_url = Column(Text, nullable=True)
     cloudinary_public_id = Column(Text, nullable=True)
-    image_type = Column(String(50), default='user_upload')  # user_upload, avatar, reward, verification
+    image_type = Column(String(50), default='user_upload')
     uploaded_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -153,17 +153,14 @@ def get_session():
 async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', folder='telegram_bot'):
     """Upload image to Cloudinary and return result dict"""
     try:
-        # Convert to BytesIO if needed
         if isinstance(image_bytes, (bytes, bytearray)):
             image_bytes = BytesIO(image_bytes)
         
         image_bytes.seek(0)
         
-        # Generate unique public_id
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         public_id = f"{folder}/user_{user_id}/{image_type}_{timestamp}_{random.randint(1000, 9999)}"
         
-        # Upload to Cloudinary
         result = cloudinary.uploader.upload(
             image_bytes,
             public_id=public_id,
@@ -190,12 +187,61 @@ async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', f
 
 # ============ CONSTANTS ============
 RISK_LEVELS = {
-    1: {"name": "Safe", "description": "Private, no exposure"},
-    2: {"name": "Low Risk", "description": "Minimal exposure"},
-    3: {"name": "Medium Risk", "description": "Empty public spaces"},
-    4: {"name": "High Risk", "description": "Public with escape"},
-    5: {"name": "Extreme Risk", "description": "Likely to be caught"}
+    1: {"name": "Safe", "description": "Private, no exposure, completely controlled environment"},
+    2: {"name": "Low", "description": "Private with minor vulnerability (unlocked door, thin walls)"},
+    3: {"name": "Medium", "description": "Semi-private (near windows, balcony, could be heard/seen)"},
+    4: {"name": "High", "description": "Semi-public (visible areas, shared spaces, immediate exposure risk)"},
+    5: {"name": "Extreme", "description": "Public-adjacent (hallways, stairwells, high exposure possible)"}
 }
+
+# Optional inspiration for AI - not constraints
+RISK_INSPIRATION = {
+    "Hotel": {
+        3: ["room with curtains open", "balcony", "near window"],
+        4: ["room doorway", "connecting door area", "bathroom with door cracked"],
+        5: ["hallway", "stairwell", "elevator lobby", "ice machine room"]
+    },
+    "Home": {
+        3: ["bedroom with door open", "near window", "garage"],
+        4: ["front porch", "backyard", "garage with door open", "living room"],
+        5: ["driveway", "apartment hallway", "shared laundry room"]
+    },
+    "Retail Store": {
+        3: ["dressing room", "back corner"],
+        4: ["fitting room with curtain", "employee hallway"],
+        5: ["parking lot", "loading dock", "alley behind store"]
+    },
+    "Vehicle": {
+        3: ["parked in empty lot", "back seat"],
+        4: ["parked near others", "rest stop"],
+        5: ["busy parking lot", "gas station", "highway rest area"]
+    },
+    "Work": {
+        3: ["private office", "bathroom stall"],
+        4: ["empty conference room", "stairwell"],
+        5: ["parking garage", "rooftop", "elevator"]
+    }
+}
+
+def get_risk_inspiration(location, risk_level):
+    """Get optional inspiration examples for the AI - not constraints"""
+    if risk_level < 3:
+        return ""
+    
+    location_key = None
+    location_lower = (location or "").lower()
+    for key in RISK_INSPIRATION:
+        if key.lower() in location_lower:
+            location_key = key
+            break
+    
+    if not location_key:
+        location_key = "Home"
+    
+    examples = RISK_INSPIRATION.get(location_key, {}).get(risk_level, [])
+    if examples:
+        return f" (inspiration: {', '.join(examples[:2])})"
+    return ""
 
 KINK_CATEGORIES = {
     "kink_exposure": ("📸 Exposure", "Being seen/photographed"),
@@ -386,18 +432,19 @@ def parse_verification(response):
 async def generate_task_text(user, session=None):
     outfit_items = json.loads(user.outfit_items or '[]')
     gender = user.gender or "nonbinary"
-    base_risk = user.risk_level or 1
+    max_risk = user.risk_level or 1
     
     location = user.custom_location or user.location or "Unknown"
     others = user.context_others or "alone"
     privacy = user.context_privacy or "private"
     
-    bonus = CONTEXT_OPTIONS.get(others, {}).get("bonus", 0)
+    # Calculate actual risk for this task - uniform 1 to max_risk
+    actual_risk = random.randint(1, max_risk)
+    
+    # Kids safety override
     if others == "kids":
-        effective_risk = min(2, base_risk)
-    else:
-        privacy_mod = 1 if privacy == "exposed" else 0
-        effective_risk = min(5, base_risk + bonus + privacy_mod)
+        actual_risk = min(2, actual_risk)
+        max_risk = min(2, max_risk)
     
     items_text = ", ".join(outfit_items) if outfit_items else "clothing"
     guide = GENDER_GUIDELINES.get(gender, GENDER_GUIDELINES["nonbinary"])
@@ -435,6 +482,10 @@ async def generate_task_text(user, session=None):
     if session:
         session.commit()
     
+    # Build risk context - note this is the ACTUAL risk, not max
+    risk_desc = RISK_LEVELS[actual_risk]["description"]
+    risk_inspiration = get_risk_inspiration(location, actual_risk) if actual_risk >= 3 else ""
+    
     yes_text = f"\nDESIRED: {', '.join(yes_kinks)}" if yes_kinks else ""
     selected_text = f"\nUSE: {', '.join(selected_kinks)}"
     forbidden_text = f"\n\nNEVER: {', '.join(forbidden_kinks)}" if forbidden_kinks else ""
@@ -443,20 +494,25 @@ async def generate_task_text(user, session=None):
 
 Location: {location}
 Context: {others}, {privacy} privacy
-Risk: {effective_risk}/5
+Max Risk Level: {max_risk}/5 (user allows up to this level)
+This Task Risk: {actual_risk}/5 - {risk_desc}{risk_inspiration}
 Outfit: {user.current_outfit}
 Items: {items_text}
 Body parts: {body_parts}{yes_text}{selected_text}{forbidden_text}
 
 Rules:
-- Single action, photo proof
+- Single action, photo proof required
 - No time durations
 - Never use forbidden kinks
-- Be creative and specific
+- Be creative and unpredictable
+- Risk 3-5: Consider windows, doorways, visibility, shared spaces
+- Risk 4-5: Can include immediate exterior areas, hallways, stairwells
+- Use the risk level as creative inspiration, not a requirement
+- Vary the intensity - sometimes mild, sometimes pushing boundaries
 
 Task:"""
     
-    response = await generate_ai_response(prompt, temperature=0.9)
+    response = await generate_ai_response(prompt, temperature=0.95)
     
     if response:
         response = response.strip()
@@ -476,7 +532,15 @@ Task:"""
         
         return response
     
-    return f"Strip at {location} and photograph your {random.choice(guide['body_parts'][:3])}"
+    # Fallback that respects actual risk
+    fallbacks = {
+        1: f"Strip completely at {location} and photograph your reflection",
+        2: f"Strip at {location} near the unlocked door and take a photo",
+        3: f"Expose yourself at {location} near a window and photograph the view",
+        4: f"Step just outside {location} doorway, expose yourself, and take a photo",
+        5: f"Walk to the end of the {location} hallway, expose yourself briefly, photograph the empty hall behind you"
+    }
+    return fallbacks.get(actual_risk, fallbacks[1])
 
 # ============ AVATAR ============
 async def generate_avatar_pose(user, pose_type="dominant"):
@@ -508,55 +572,73 @@ async def generate_avatar_pose(user, pose_type="dominant"):
             "seed": random.randint(1, 1000000)
         }
         
-        logger.info(f"Generating image...")
+        logger.info(f"Generating image with prompt: {prompt[:100]}...")
         response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
         
         logger.info(f"Image API status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
+            logger.info(f"Response keys: {result.keys()}")
+            
             if 'images' in result and result['images']:
                 image_data = result['images'][0]
+                logger.info(f"Image data type: {type(image_data)}, starts with: {str(image_data)[:50]}")
                 
                 # Handle URL
-                if image_data.startswith('http'):
+                if isinstance(image_data, str) and image_data.startswith('http'):
                     img_response = requests.get(image_data, timeout=30)
                     if img_response.status_code == 200:
+                        logger.info(f"Downloaded image from URL: {len(img_response.content)} bytes")
                         return img_response.content
                     else:
                         logger.error(f"Failed to download: {img_response.status_code}")
                         return None
                 # Handle base64 data URI
-                elif image_data.startswith('data:image'):
+                elif isinstance(image_data, str) and image_data.startswith('data:image'):
                     base64_data = image_data.split(',')[1]
-                    return base64.b64decode(base64_data)
-                # Handle raw base64
-                else:
+                    decoded = base64.b64decode(base64_data)
+                    logger.info(f"Decoded base64 data URI: {len(decoded)} bytes")
+                    return decoded
+                # Handle raw base64 string
+                elif isinstance(image_data, str):
                     try:
-                        return base64.b64decode(image_data)
-                    except:
-                        logger.error("Unknown image format")
+                        decoded = base64.b64decode(image_data)
+                        logger.info(f"Decoded raw base64: {len(decoded)} bytes")
+                        return decoded
+                    except Exception as e:
+                        logger.error(f"Failed to decode base64: {e}")
                         return None
+                # Handle bytes directly
+                elif isinstance(image_data, bytes):
+                    logger.info(f"Got bytes directly: {len(image_data)} bytes")
+                    return image_data
         
-        logger.error(f"Image API error: {response.status_code}")
+        logger.error(f"Image API error: {response.status_code} - {response.text[:200]}")
         return None
         
     except Exception as e:
         logger.error(f"Avatar error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 async def send_avatar_photo(context, chat_id, image_bytes, caption):
     """Helper to send avatar photo from bytes"""
     try:
         if image_bytes:
+            buf = BytesIO(image_bytes)
+            buf.seek(0)
             await context.bot.send_photo(
                 chat_id=chat_id,
-                photo=BytesIO(image_bytes),
+                photo=buf,
                 caption=caption
             )
             return True
     except Exception as e:
         logger.error(f"Send photo error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     return False
 
 # ============ CHAT HANDLER ============
@@ -723,6 +805,9 @@ async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYP
     if not context.user_data.get('awaiting_custom_outfit'):
         return
     
+    # Clear flag FIRST
+    context.user_data['awaiting_custom_outfit'] = False
+    
     user_id = update.effective_user.id
     custom = update.message.text
     
@@ -737,8 +822,6 @@ async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("✅ Outfit saved. Use /wherenow!")
     finally:
         session.close()
-    
-    context.user_data['awaiting_custom_outfit'] = False
 
 async def wherenow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -832,6 +915,9 @@ async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_T
     if not context.user_data.get('awaiting_custom_location'):
         return
     
+    # Clear flag FIRST
+    context.user_data['awaiting_custom_location'] = False
+    
     user_id = update.effective_user.id
     location = update.message.text
     
@@ -852,8 +938,6 @@ async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text(f"📍 {location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
-    
-    context.user_data['awaiting_custom_location'] = False
 
 async def risk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"{i}️⃣ {RISK_LEVELS[i]['name']}", callback_data=f"risk_{i}")] for i in range(1, 6)]
@@ -1287,7 +1371,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if verified == "yes":
             task.status = "completed"
             task.completed_at = now
-            task.photo_url = photo.file_id  # Keep Telegram file_id too
+            task.photo_url = photo.file_id
             
             user = session.query(UserState).filter_by(user_id=user_id).first()
             user.points += 10 * task.risk_level
@@ -1458,7 +1542,7 @@ async def avatar_build_callback(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['avatar_build'] = build
     
     keyboard = [[InlineKeyboardButton(h, callback_data=f"av_hair_{k}")] for k, h in AVATAR_HAIR.items()]
-    await query.edit_message_text(f"✅ Build: {AVATAR_BUILDS[build]['name']}\n\nStep 4/5: Select hair:", replyMarkup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"✅ Build: {AVATAR_BUILDS[build]['name']}\n\nStep 4/5: Select hair:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def avatar_hair_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1697,7 +1781,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.query(Task).filter_by(user_id=user_id).delete()
         session.query(TaskHistory).filter_by(user_id=user_id).delete()
         session.query(AvatarImage).filter_by(user_id=user_id).delete()
-        session.query(UserImage).filter_by(user_id=user_id).delete()  # Also delete user images
+        session.query(UserImage).filter_by(user_id=user_id).delete()
         session.query(UserState).filter_by(user_id=user_id).delete()
         session.commit()
         await query.edit_message_text("✅ All data deleted. Send /start.")
@@ -1760,6 +1844,11 @@ def main():
     
     # Photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    
+    # CUSTOM INPUT HANDLERS - ADD THESE HERE (before chat_handler)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_outfit))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_location))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input))
     
     # Chat handler (must be last for text)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
