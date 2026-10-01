@@ -453,19 +453,58 @@ async def send_avatar_photo(context, chat_id, image_bytes, caption):
         logger.error(traceback.format_exc())
     return False
 
-# ============ CHAT HANDLER ============
-async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============ CUSTOM INPUT DISPATCHER ============
+async def custom_input_dispatcher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Dispatch to appropriate custom input handler based on database flags"""
     user_id = update.effective_user.id
+    text = update.message.text[:50]
+    
+    logger.info(f"=== DISPATCHER triggered for user {user_id}, text='{text}' ===")
+    
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        is_awaiting = user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval)
-        logger.info(f"chat_handler check: user={user is not None}, awaiting_flags={is_awaiting}")
-        if is_awaiting:
-            logger.info("chat_handler: SKIPPING (awaiting input)")
+        
+        if not user:
+            logger.info(f"DISPATCHER: No user found, passing to chat_handler")
+            return
+        
+        logger.info(f"DISPATCHER: Flags - outfit={user.awaiting_custom_outfit}, location={user.awaiting_custom_location}, interval={user.awaiting_interval}")
+        
+        # Check which flag is set and dispatch accordingly
+        if user.awaiting_custom_outfit:
+            logger.info(f"DISPATCHER: Routing to handle_custom_outfit")
+            await handle_custom_outfit(update, context)
+            return
+            
+        elif user.awaiting_custom_location:
+            logger.info(f"DISPATCHER: Routing to handle_custom_location")
+            await handle_custom_location(update, context)
+            return
+            
+        elif user.awaiting_interval:
+            logger.info(f"DISPATCHER: Routing to handle_interval_input")
+            await handle_interval_input(update, context)
+            return
+            
+        logger.info(f"DISPATCHER: No flags set, letting chat_handler process")
+        
+    finally:
+        session.close()
+
+# ============ CHAT HANDLER ============
+async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    session = get_session()
+    try:
+        user = session.query(UserState).filter_by(user_id=user_id).first()
+        if user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval):
+            logger.info(f"chat_handler: SKIPPING (awaiting custom input)")
             return
     finally:
         session.close()
+    
     message_text = update.message.text
     session = get_session()
     try:
@@ -507,7 +546,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test if handlers are working"""
     user_id = update.effective_user.id
     session = get_session()
     try:
@@ -580,12 +618,12 @@ async def outfit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"=== handle_custom_outfit TRIGGERED for user {user_id} ===")
+    logger.info(f"=== handle_custom_outfit EXECUTING for user {user_id} ===")
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if not user or not user.awaiting_custom_outfit:
-            logger.info(f"handle_custom_outfit: SKIPPING (flag={user.awaiting_custom_outfit if user else 'no user'})")
+        if not user:
+            logger.error(f"handle_custom_outfit: No user found")
             return
         user.awaiting_custom_outfit = False
         custom = update.message.text
@@ -644,18 +682,12 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text[:50]
-    logger.info(f"=== handle_custom_location TRIGGERED for user {user_id}, text='{text}' ===")
+    logger.info(f"=== handle_custom_location EXECUTING for user {user_id}, text='{text}' ===")
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        logger.info(f"User found: {user is not None}")
-        if user:
-            logger.info(f"awaiting_custom_location = {user.awaiting_custom_location}")
         if not user:
-            logger.error(f"No user found for {user_id}")
-            return
-        if not user.awaiting_custom_location:
-            logger.info(f"awaiting_custom_location is False, skipping")
+            logger.error(f"handle_custom_location: No user found")
             return
         user.awaiting_custom_location = False
         user.custom_location = update.message.text[:100]
@@ -797,7 +829,7 @@ async def kinks_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             emoji = KINK_LEVELS[current_level]["emoji"]
             keyboard.append([InlineKeyboardButton(f"{emoji} {name}", callback_data=f"kinkmenu_{kink_key}")])
         keyboard.append([InlineKeyboardButton("🔙 Done", callback_data="kinks_done")])
-        await update.message.reply_text("🎭 Kink Preferences\n\n❌ = No (hard limit)\n⭕ = Okay (Dom may use)\n✅ = Yes (desired/favorite)\n\nTap a kink to cycle through options:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("🎭 Kink Preferences\n\n❌ = No (hard limit)\n⭕ = Okay (Dom may use)\n✅ = Yes (desired/favorite)\n\nTap a kink to cycle through options:", reply_markup=InlineKeyboardMarkup(keyboard))
     finally:
         session.close()
 
@@ -824,12 +856,11 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_interval_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    logger.info(f"=== handle_interval_input TRIGGERED for user {user_id} ===")
+    logger.info(f"=== handle_interval_input EXECUTING for user {user_id} ===")
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if not user or not user.awaiting_interval:
-            logger.info(f"handle_interval_input: SKIPPING (flag={user.awaiting_interval if user else 'no user'})")
+        if not user:
             return
         text = update.message.text.strip().lower()
         if text == 'cancel':
@@ -1297,7 +1328,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============ MAIN ============
 def main():
     logger.info("=" * 60)
-    logger.info("BOT STARTING - VERSION WITH FULL DEBUG LOGGING")
+    logger.info("BOT STARTING - VERSION WITH DISPATCHER FIX")
     logger.info("=" * 60)
     
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1344,10 +1375,8 @@ def main():
     application.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
     application.add_handler(CallbackQueryHandler(mercy_callback, pattern="^mercy_"))
     
-    # CUSTOM INPUT HANDLERS - MUST BE BEFORE PHOTO AND CHAT HANDLERS
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_outfit))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_location))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_interval_input))
+    # SINGLE DISPATCHER FOR ALL CUSTOM INPUTS
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input_dispatcher))
     
     # Photo handler
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
