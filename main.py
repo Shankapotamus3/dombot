@@ -73,11 +73,9 @@ class UserState(Base):
     avatar_genital_size = Column(String(20), default=None)
     challenges_since_reward = Column(Integer, default=0)
     last_kinks_used = Column(Text, default=None)
-    # New columns for input state tracking
     awaiting_custom_outfit = Column(Boolean, default=False)
     awaiting_custom_location = Column(Boolean, default=False)
     awaiting_interval = Column(Boolean, default=False)
-    # Kink columns
     kink_exposure = Column(String(10), default="no")
     kink_humiliation = Column(String(10), default="no")
     kink_degradation = Column(String(10), default="no")
@@ -625,7 +623,6 @@ async def send_avatar_photo(context, chat_id, image_bytes, caption):
             logger.error(f"Invalid image bytes: {len(image_bytes) if image_bytes else 'None'}")
             return False
         
-        # Validate it's actually an image by checking magic bytes
         header = image_bytes[:20]
         is_jpeg = header.startswith(b'\xff\xd8')
         is_png = header.startswith(b'\x89PNG')
@@ -655,12 +652,12 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Respond to regular messages conversationally"""
     user_id = update.effective_user.id
     
-    # Check database for awaiting states
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user and (user.awaiting_custom_outfit or user.awaiting_custom_location or user.awaiting_interval):
-            return  # Let specific handlers take it
+            logger.info(f"chat_handler: skipping due to awaiting flags - outfit={user.awaiting_custom_outfit}, location={user.awaiting_custom_location}, interval={user.awaiting_interval}")
+            return
     finally:
         session.close()
     
@@ -801,8 +798,9 @@ async def outfit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if outfit_key == "custom":
-            user.awaiting_custom_outfit = True  # Store in DB
+            user.awaiting_custom_outfit = True
             session.commit()
+            logger.info(f"Set awaiting_custom_outfit=True for user {user_id}")
             await query.edit_message_text("Describe your outfit:")
             return
         
@@ -823,9 +821,8 @@ async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if not user or not user.awaiting_custom_outfit:
-            return  # Not awaiting, let chat_handler take it
+            return
         
-        # Clear flag in DB first
         user.awaiting_custom_outfit = False
         
         custom = update.message.text
@@ -834,6 +831,7 @@ async def handle_custom_outfit(update: Update, context: ContextTypes.DEFAULT_TYP
         user.outfit_items = json.dumps(items[:6])
         session.commit()
         
+        logger.info(f"Saved custom outfit for user {user_id}: {user.current_outfit}")
         await update.message.reply_text("✅ Outfit saved. Use /wherenow!")
     finally:
         session.close()
@@ -855,16 +853,25 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ctx_type = query.data.replace("ctx_", "")
     
+    logger.info(f"Context callback triggered: {ctx_type} for user {user_id}")
+    
     if ctx_type == "custom":
         session = get_session()
         try:
             user = session.query(UserState).filter_by(user_id=user_id).first()
             if user:
-                user.awaiting_custom_location = True  # Store in DB
+                user.awaiting_custom_location = True
                 session.commit()
+                logger.info(f"Set awaiting_custom_location=True for user {user_id}")
+                await query.edit_message_text("Describe exactly where you are:")
+            else:
+                logger.error(f"No user found for {user_id} in context_callback")
+        except Exception as e:
+            logger.error(f"Error setting custom location flag: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
         finally:
             session.close()
-        await query.edit_message_text("Describe exactly where you are:")
         return
     
     loc_map = {"store": "Retail Store", "home": "Home", "hotel": "Hotel", "car": "Vehicle", "work": "Work"}
@@ -877,6 +884,7 @@ async def context_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user.location = location
             user.custom_location = location
             session.commit()
+            logger.info(f"Set location to {location} for user {user_id}")
     finally:
         session.close()
     
@@ -935,20 +943,30 @@ async def privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    text = update.message.text[:50]
+    
+    logger.info(f"handle_custom_location triggered for user {user_id}, text='{text}'")
     
     session = get_session()
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
-        if not user or not user.awaiting_custom_location:
+        
+        logger.info(f"handle_custom_location: user={user is not None}, awaiting={user.awaiting_custom_location if user else 'N/A'}")
+        
+        if not user:
+            logger.error(f"No user found for {user_id}")
             return
         
-        # Clear flag in DB first
-        user.awaiting_custom_location = False
+        if not user.awaiting_custom_location:
+            logger.info(f"awaiting_custom_location is False for user {user_id}, returning")
+            return
         
-        location = update.message.text
-        user.custom_location = location[:100]
+        user.awaiting_custom_location = False
+        user.custom_location = update.message.text[:100]
         user.location = "Custom"
         session.commit()
+        
+        logger.info(f"Saved custom location for user {user_id}: {user.custom_location}")
         
         keyboard = [
             [InlineKeyboardButton("🧍 Alone", callback_data="present_alone")],
@@ -956,7 +974,11 @@ async def handle_custom_location(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("🏠 Roommates", callback_data="present_roommates")],
             [InlineKeyboardButton("👥 Public", callback_data="present_public")]
         ]
-        await update.message.reply_text(f"📍 {location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(f"📍 {user.custom_location}\n\nWho is present?", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"Error in handle_custom_location: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         session.close()
 
@@ -1110,7 +1132,7 @@ async def interval_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Use /start first")
             return
         
-        user.awaiting_interval = True  # Store in DB
+        user.awaiting_interval = True
         session.commit()
         
         current_min = user.min_interval
@@ -1193,7 +1215,6 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("Generating your task...")
         
-        # Avatar image chance
         if random.random() < 0.3 and user.avatar_gender:
             avatar_bytes = await generate_avatar_pose(user, "dominant")
             if avatar_bytes:
@@ -1232,7 +1253,6 @@ async def task_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 async def mercy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Offer mercy - give alternative task"""
     query = update.callback_query
     await query.answer()
     task_id = int(query.data.replace("mercy_", ""))
@@ -1326,7 +1346,7 @@ async def rewards_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         session.close()
 
-# ============ PHOTO HANDLING WITH CLOUDINARY ============
+# ============ PHOTO HANDLING ============
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = get_session()
@@ -1335,7 +1355,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         task = session.query(Task).filter_by(user_id=user_id, status="pending").first()
         
-        # Download photo from Telegram first
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         
@@ -1346,14 +1365,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Photo too small. Send clearer photo.")
             return
         
-        # Upload to Cloudinary FIRST (backup all user photos)
         cloudinary_result = await upload_to_cloudinary(
             photo_bytes, 
             user_id, 
             image_type='verification' if task else 'user_upload'
         )
         
-        # Save to UserImage table for backup tracking
         user_image = UserImage(
             user_id=user_id,
             telegram_file_id=photo.file_id,
@@ -1364,7 +1381,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.add(user_image)
         session.commit()
         
-        # If no active task, just confirm backup
         if not task:
             msg = "📸 Image saved to your collection."
             if cloudinary_result:
@@ -1372,7 +1388,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
             return
         
-        # Process task verification
         now = datetime.now(timezone.utc)
         if now > task.expires_at:
             task.status = "expired"
@@ -1380,12 +1395,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Task expired. Use /task.")
             return
         
-        # Verify with Venice AI
         verification = await analyze_image(photo_bytes, task.task_text)
         verified, reason = parse_verification(verification)
         task.verification_attempts += 1
         
-        # Update task with Cloudinary URL
         if cloudinary_result:
             task.cloudinary_url = cloudinary_result['url']
             task.cloudinary_public_id = cloudinary_result['public_id']
@@ -1413,13 +1426,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 reward_bytes = await generate_avatar_pose(user, "reward")
                 if reward_bytes:
-                    # Also backup reward images to Cloudinary
                     reward_cloudinary = await upload_to_cloudinary(
                         reward_bytes, user_id, image_type='reward'
                     )
                     await send_avatar_photo(context, user_id, reward_bytes, f"🎁 Your reward, {title} is pleased.")
                     
-                    # Save reward image record
                     if reward_cloudinary:
                         reward_image = UserImage(
                             user_id=user_id,
@@ -1485,7 +1496,6 @@ async def retry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text("📸 Send retry photo.")
 
 async def auto_clear_task(context: ContextTypes.DEFAULT_TYPE):
-    """Job queue callback for task timeout"""
     job_data = context.job.data
     user_id = job_data['user_id']
     task_id = job_data['task_id']
@@ -1608,7 +1618,6 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user.avatar_genital_size = size
                 session.commit()
             
-            # Upload avatar to Cloudinary too
             cloudinary_result = await upload_to_cloudinary(
                 image_bytes, user_id, image_type='avatar'
             )
@@ -1727,14 +1736,12 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
             active = session.query(Task).filter_by(user_id=user.user_id, status="pending").first()
             if not active:
                 try:
-                    # Send avatar if available
                     if random.random() < 0.3 and user.avatar_gender:
                         avatar_bytes = await generate_avatar_pose(user, "dominant")
                         if avatar_bytes:
                             await send_avatar_photo(context, user.user_id, avatar_bytes, "Your task awaits...")
                             await asyncio.sleep(1)
                     
-                    # Generate task
                     task_text = await generate_task_text(user, session)
                     
                     expires = now + timedelta(minutes=30)
@@ -1748,7 +1755,6 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
                     session.add(task)
                     session.commit()
                     
-                    # Schedule timeout
                     context.job_queue.run_once(
                         auto_clear_task,
                         when=expires,
@@ -1756,7 +1762,6 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
                         name=f"timeout_{task.id}"
                     )
                     
-                    # Send task
                     title = get_title(user.avatar_gender)
                     keyboard = [
                         [InlineKeyboardButton(f"📸 Done, {title}", callback_data=f"complete_{task.id}")],
@@ -1770,7 +1775,6 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
                         reply_markup=InlineKeyboardMarkup(keyboard)
                     )
                     
-                    # Update next task time
                     user.next_task_time = now + timedelta(minutes=random.randint(user.min_interval, user.max_interval))
                     session.commit()
                     
