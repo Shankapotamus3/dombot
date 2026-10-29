@@ -38,8 +38,9 @@ IMAGE_UPSCALE = os.getenv("IMAGE_UPSCALE", "off").strip()
 IMAGE_ASPECT = os.getenv("IMAGE_ASPECT", "3:4").strip()
 MODEL_SPEC = {}
 MODEL_SPECS = {}
-SHARP_TAIL = "raw unretouched photo, direct on-camera flash, hard light, deep focus f/11, razor sharp eyelashes and eyebrows, visible skin pores and texture, crisp fabric weave, high microcontrast, full frame DSLR"
-NEGATIVE_PROMPT = "blurry, soft focus, bokeh, shallow focus, out of focus, motion blur, low detail, smeared, jpeg artifacts, airbrushed, smooth plastic skin, beauty filter, retouched, glowing skin"
+SHARP_TAIL = "editorial portrait photograph, sharp focus on the eyes and face, deep focus, natural skin texture, crisp fabric detail, flattering directional light, professional studio lighting, 85mm lens"
+NEGATIVE_PROMPT = "blurry, soft focus, bokeh, shallow focus, out of focus, motion blur, low detail, smeared, airbrushed, smooth plastic skin, beauty filter, harsh flash, blown out highlights, overexposed, grainy"
+STUDIO = "against a seamless charcoal studio backdrop, subtle rim light from behind"
 SOFT_WORDS = re.compile(
     r"\b(soft focus|shallow depth of field|bokeh|dreamy|hazy|misty|film grain|"
     r"cinematic glow|soft lighting|glowing|ethereal)\b", re.IGNORECASE)
@@ -209,9 +210,9 @@ def normalize_for_telegram(image_bytes, max_side=2048, sharpen=True):
         img = img.convert("RGB")
         img.thumbnail((max_side, max_side), Image.LANCZOS)
         if sharpen:
-            img = img.filter(ImageFilter.UnsharpMask(radius=1.4, percent=140, threshold=3))
-            img = ImageEnhance.Contrast(img).enhance(1.08)
-            img = ImageEnhance.Sharpness(img).enhance(1.2)
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.2, percent=105, threshold=4))
+            img = ImageEnhance.Contrast(img).enhance(1.04)
+            img = ImageEnhance.Sharpness(img).enhance(1.08)
         out = BytesIO()
         img.save(out, format="JPEG", quality=95, progressive=False, optimize=True)
         return out.getvalue()
@@ -333,18 +334,30 @@ AVATAR_HAIR = {"blonde": "Blonde", "brunette": "Brunette", "black": "Black", "re
 AVATAR_SIZES = {"small": {"emoji": "🔹", "name": "Small", "male": "small penis", "female": "small breasts", "trans": "small breasts and penis"}, "medium": {"emoji": "🔸", "name": "Medium", "male": "medium penis", "female": "medium breasts", "trans": "medium breasts and penis"}, "large": {"emoji": "🔶", "name": "Large", "male": "large penis", "female": "large breasts", "trans": "large breasts and penis"}}
 
 DOMINANT_POSES = [
-    "three-quarter body shot from mid-thigh up, hands on hips, dominant stance",
-    "waist-up shot, arms crossed, looking down at camera, powerful",
-    "waist-up shot, holding riding crop across chest, stern expression",
+    "three-quarter shot from the knees up, hands on hips, dominant stance",
+    "three-quarter shot, arms crossed, looking down at camera, powerful",
+    "three-quarter shot holding a riding crop across the chest, stern expression",
     "three-quarter shot seated on the edge of a chair, legs crossed, commanding",
-    "waist-up shot holding a leash, expectant expression",
-    "three-quarter shot, one hand on hip, chin lifted, superior pose",
+    "three-quarter shot holding a leash, expectant expression",
+    "three-quarter shot leaning against a doorframe, arms folded, chin lifted",
+    "three-quarter shot, one hand on hip, weight on one leg, superior",
+    "three-quarter shot from a low angle, looking down, dominant posture",
     "waist-up shot, finger pointing at camera, commanding gesture",
-    "three-quarter shot leaning against a doorframe, arms folded",
-    "waist-up shot, holding a collar in both hands, dominant posture",
     "medium close-up from the chest up, direct eye contact, cold expression",
 ]
-DOMINANT_OUTFITS = ["latex catsuit", "leather corset and thigh boots", "dominatrix outfit with gloves", "sheer bodysuit with harness", "pvc dress with choker", "fishnet bodysuit with straps", "leather harness and panties", "lace lingerie with garter belt", "shiny metallic bikini", "strappy harness outfit"]
+DOMINANT_OUTFITS_FEMALE = [
+    "black latex catsuit", "leather corset and thigh-high boots", "sheer bodysuit with leather harness",
+    "black PVC dress with choker", "fishnet bodysuit with straps", "leather harness over bare skin",
+    "lace lingerie with garter belt", "strappy leather harness outfit", "shiny black latex mini dress",
+    "leather bra and high-waisted latex leggings",
+]
+DOMINANT_OUTFITS_MALE = [
+    "open black leather vest over bare chest, leather trousers", "bare-chested with a leather chest harness",
+    "black latex trousers and a leather harness", "sleeveless black shirt, leather belt, leather trousers",
+    "black waistcoat with no shirt, leather cuffs", "tight black t-shirt and leather trousers",
+    "open black shirt, bare chest, leather trousers", "leather kilt and bare chest",
+    "black latex shirt and leather harness", "dark grey suit trousers with no shirt, leather suspenders",
+]
 
 GREETINGS = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hiya", "howdy", "greetings", "sup", "yo"]
 TASK_INQUIRIES = ["task", "my task", "current task", "what task", "do i have a task", "any task", "status", "check task", "pending task"]
@@ -768,11 +781,12 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, framed from the thighs up, face filling the upper third"
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, framed from the thighs up, face filling the upper third, {STUDIO}"
         else:
+            outfits = DOMINANT_OUTFITS_MALE if gender == "male" else DOMINANT_OUTFITS_FEMALE
             pose = random.choice(DOMINANT_POSES)
-            outfit = random.choice(DOMINANT_OUTFITS)
-            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, face filling the upper third"
+            outfit = random.choice(outfits)
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, face filling the upper third, {STUDIO}"
         return await _build_and_send(user, prompt, user.user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -787,9 +801,9 @@ async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=No
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
         if gender == "trans":
-            prompt = f"Raw editorial photograph of a striking feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third"
+            prompt = f"Raw editorial photograph of a striking feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third, {STUDIO}"
         else:
-            prompt = f"Raw editorial photograph of a striking {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third"
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third, {STUDIO}"
         return await _build_and_send(None, prompt, user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -1786,7 +1800,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
-        "Raw editorial photograph of a striking white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, framed from the thighs up, face filling the upper third"
+        f"Raw editorial photograph of a striking white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, framed from the thighs up, face filling the upper third, {STUDIO}"
     )
     if not raw:
         await update.message.reply_text("No image returned - check the log.")
