@@ -31,14 +31,15 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 VENICE_UPSCALE_URL = "https://api.venice.ai/api/v1/image/upscale"
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "z-image-turbo").strip()
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "nano-banana-pro").strip()
 IMAGE_FALLBACKS = [m.strip() for m in os.getenv("IMAGE_FALLBACKS", "chroma").split(",") if m.strip()]
-IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "jpeg").strip()
-IMAGE_UPSCALE = os.getenv("IMAGE_UPSCALE", "2").strip()
+IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "png").strip()
+IMAGE_UPSCALE = os.getenv("IMAGE_UPSCALE", "off").strip()
+IMAGE_ASPECT = os.getenv("IMAGE_ASPECT", "3:4").strip()
 MODEL_SPEC = {}
 MODEL_SPECS = {}
-SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
-NEGATIVE_PROMPT = "blurry, soft focus, bokeh, out of focus, motion blur, low detail, smeared, jpeg artifacts"
+SHARP_TAIL = "raw unretouched photo, direct on-camera flash, hard light, deep focus f/11, razor sharp eyelashes and eyebrows, visible skin pores and texture, crisp fabric weave, high microcontrast, full frame DSLR"
+NEGATIVE_PROMPT = "blurry, soft focus, bokeh, shallow focus, out of focus, motion blur, low detail, smeared, jpeg artifacts, airbrushed, smooth plastic skin, beauty filter, retouched, glowing skin"
 SOFT_WORDS = re.compile(
     r"\b(soft focus|shallow depth of field|bokeh|dreamy|hazy|misty|film grain|"
     r"cinematic glow|soft lighting|glowing|ethereal)\b", re.IGNORECASE)
@@ -195,8 +196,8 @@ def sniff_ext(b):
         return "png"
     return "bin"
 
-def normalize_for_telegram(image_bytes, max_side=1920, sharpen=True):
-    """Decode any image format, add micro-detail, re-encode as baseline JPEG."""
+def normalize_for_telegram(image_bytes, max_side=2048, sharpen=True):
+    """Decode any image format, resize, add micro-detail, re-encode as baseline JPEG."""
     try:
         img = Image.open(BytesIO(image_bytes))
         img.load()
@@ -206,15 +207,11 @@ def normalize_for_telegram(image_bytes, max_side=1920, sharpen=True):
     try:
         logger.info(f"Decoded image size: {img.size}")
         img = img.convert("RGB")
-        if sharpen:
-            w, h = img.size
-            if max(w, h) < max_side:
-                s = max_side / max(w, h)
-                img = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
-            img = img.filter(ImageFilter.UnsharpMask(radius=1.6, percent=185, threshold=2))
-            img = ImageEnhance.Contrast(img).enhance(1.06)
-            img = ImageEnhance.Sharpness(img).enhance(1.15)
         img.thumbnail((max_side, max_side), Image.LANCZOS)
+        if sharpen:
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.4, percent=140, threshold=3))
+            img = ImageEnhance.Contrast(img).enhance(1.08)
+            img = ImageEnhance.Sharpness(img).enhance(1.2)
         out = BytesIO()
         img.save(out, format="JPEG", quality=95, progressive=False, optimize=True)
         return out.getvalue()
@@ -335,7 +332,18 @@ AVATAR_BUILDS = {"slim": {"emoji": "🧍", "name": "Slim", "desc": "extremely sk
 AVATAR_HAIR = {"blonde": "Blonde", "brunette": "Brunette", "black": "Black", "red": "Red", "pink": "Pink", "blue": "Blue", "purple": "Purple", "white": "White/Silver"}
 AVATAR_SIZES = {"small": {"emoji": "🔹", "name": "Small", "male": "small penis", "female": "small breasts", "trans": "small breasts and penis"}, "medium": {"emoji": "🔸", "name": "Medium", "male": "medium penis", "female": "medium breasts", "trans": "medium breasts and penis"}, "large": {"emoji": "🔶", "name": "Large", "male": "large penis", "female": "large breasts", "trans": "large breasts and penis"}}
 
-DOMINANT_POSES = ["standing with hands on hips, dominant stance", "sitting on throne-like chair, legs spread, commanding", "holding riding crop, stern expression", "crossed arms, looking down at camera, powerful", "holding leash, dominant posture", "standing over camera angle, feet visible, superior pose", "holding whip behind back, confident stance", "one foot on chair, elbow on knee, dominant", "finger pointing down, commanding gesture", "holding collar and leash, expectant expression"]
+DOMINANT_POSES = [
+    "three-quarter body shot from mid-thigh up, hands on hips, dominant stance",
+    "waist-up shot, arms crossed, looking down at camera, powerful",
+    "waist-up shot, holding riding crop across chest, stern expression",
+    "three-quarter shot seated on the edge of a chair, legs crossed, commanding",
+    "waist-up shot holding a leash, expectant expression",
+    "three-quarter shot, one hand on hip, chin lifted, superior pose",
+    "waist-up shot, finger pointing at camera, commanding gesture",
+    "three-quarter shot leaning against a doorframe, arms folded",
+    "waist-up shot, holding a collar in both hands, dominant posture",
+    "medium close-up from the chest up, direct eye contact, cold expression",
+]
 DOMINANT_OUTFITS = ["latex catsuit", "leather corset and thigh boots", "dominatrix outfit with gloves", "sheer bodysuit with harness", "pvc dress with choker", "fishnet bodysuit with straps", "leather harness and panties", "lace lingerie with garter belt", "shiny metallic bikini", "strappy harness outfit"]
 
 GREETINGS = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hiya", "howdy", "greetings", "sup", "yo"]
@@ -611,7 +619,7 @@ def _payload(prompt, model):
     c = (get_spec(model).get('constraints') or {})
     ratios = c.get('aspectRatios') or []
     if ratios:
-        data["aspect_ratio"] = "2:3" if "2:3" in ratios else c.get("defaultAspectRatio", ratios[0])
+        data["aspect_ratio"] = IMAGE_ASPECT if IMAGE_ASPECT in ratios else c.get("defaultAspectRatio", ratios[0])
         res = c.get('resolutions') or []
         if res:
             data["resolution"] = "2K" if "2K" in res else (c.get("defaultResolution") if c.get("defaultResolution") in res else res[-1])
@@ -619,7 +627,7 @@ def _payload(prompt, model):
         div = max(1, int(c.get('widthHeightDivisor') or 8))
         max_w = int(c.get('maxWidth') or 1280)
         max_h = int(c.get('maxHeight') or 1280)
-        w = min(int(os.getenv("IMAGE_WIDTH", "832")), max_w)
+        w = min(int(os.getenv("IMAGE_WIDTH", "960")), max_w)
         h = min(int(os.getenv("IMAGE_HEIGHT", "1280")), max_h)
         data["width"] = max(div, (w // div) * div)
         data["height"] = max(div, (h // div) * div)
@@ -717,7 +725,7 @@ async def _upscale(raw):
         payload = {
             "image": base64.b64encode(raw).decode("utf-8"),
             "scale": int(IMAGE_UPSCALE),
-            "creativity": float(os.getenv("IMAGE_UPSCALE_CREATIVITY", "0.01")),
+            "creativity": float(os.getenv("IMAGE_UPSCALE_CREATIVITY", "0.18")),
         }
         r = await asyncio.to_thread(
             requests.post, VENICE_UPSCALE_URL,
@@ -760,11 +768,11 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible"
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, framed from the thighs up, face filling the upper third"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude"
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, face filling the upper third"
         return await _build_and_send(user, prompt, user.user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -779,9 +787,9 @@ async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=No
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
         if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible"
+            prompt = f"Raw editorial photograph of a striking feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third"
         else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible"
+            prompt = f"Raw editorial photograph of a striking {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, framed from the thighs up, face filling the upper third"
         return await _build_and_send(None, prompt, user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -964,7 +972,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
-            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nmodel: {IMAGE_MODEL} -> {IMAGE_FALLBACKS}\nformat: {IMAGE_FORMAT} | upscale: {IMAGE_UPSCALE}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
+            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nmodel: {IMAGE_MODEL} -> {IMAGE_FALLBACKS}\nformat: {IMAGE_FORMAT} | upscale: {IMAGE_UPSCALE} | aspect: {IMAGE_ASPECT}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
         else:
             await update.message.reply_text("No user record found")
     finally:
@@ -1778,7 +1786,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
-        "Beautiful white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible"
+        "Raw editorial photograph of a striking white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, framed from the thighs up, face filling the upper third"
     )
     if not raw:
         await update.message.reply_text("No image returned - check the log.")
@@ -1928,7 +1936,7 @@ def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
     logger.info(f"Image model: {IMAGE_MODEL} | fallbacks: {IMAGE_FALLBACKS}")
-    logger.info(f"Format: {IMAGE_FORMAT} | Upscale: {IMAGE_UPSCALE}")
+    logger.info(f"Format: {IMAGE_FORMAT} | Upscale: {IMAGE_UPSCALE} | Aspect: {IMAGE_ASPECT}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     load_model_spec()
