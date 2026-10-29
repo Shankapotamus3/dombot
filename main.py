@@ -550,7 +550,7 @@ SETTING: <the setting, 2-5 words>"""
 def load_model_spec():
     """Fetch this model's constraints once so the payload matches its sizing idiom."""
     try:
-        r = await_ = requests.get(
+        r = requests.get(
             f"{VENICE_API_URL}/models?type=image",
             headers={"Authorization": f"Bearer {VENICE_API_KEY}"}, timeout=30
         )
@@ -569,7 +569,7 @@ def load_model_spec():
         logger.warning(f"Model spec error: {e}")
 
 def _payload(prompt):
-    data = {"model": IMAGE_MODEL, "prompt": prompt, "output_format": "jpeg"}
+    data = {"model": IMAGE_MODEL, "prompt": prompt, "format": "jpeg"}
     c = (MODEL_SPEC.get('constraints') or {})
     ratios = c.get('aspectRatios') or []
     if ratios:
