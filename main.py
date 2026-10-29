@@ -30,6 +30,7 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
+IMAGE_MODEL = "chroma"
 
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -535,13 +536,14 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
-IMAGE_PAYLOAD_BASE = {"model": "chroma", "width": 832, "height": 1216, "format": "jpeg", "steps": 30, "cfg_scale": 7}
+IMAGE_PAYLOAD_BASE = {"model": IMAGE_MODEL, "width": 832, "height": 1216, "format": "jpeg", "steps": 30, "cfg_scale": 7}
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     data = dict(IMAGE_PAYLOAD_BASE)
     data["prompt"] = prompt
     data["seed"] = random.randint(1, 1000000)
+    logger.info(f"Image request: model={data['model']} {data['width']}x{data['height']} steps={data.get('steps')} cfg={data.get('cfg_scale')} fmt={data.get('format')}")
     response = await asyncio.to_thread(
         requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
     )
@@ -572,6 +574,7 @@ async def _request_image(prompt):
     if not raw:
         logger.error("No image data extracted")
         return None
+    logger.info(f"Raw image received: {len(raw)} bytes, header {raw[:12]!r}")
     return raw
 
 async def _build_and_send(user, prompt, user_id=None):
@@ -583,7 +586,9 @@ async def _build_and_send(user, prompt, user_id=None):
     normalized = await asyncio.to_thread(normalize_for_telegram, raw)
     if normalized and user_id:
         await asyncio.to_thread(dump_debug, normalized, user_id, "norm")
-        logger.info(f"Raw {len(raw)}b -> normalized {len(normalized)}b")
+        logger.info(f"Normalized {len(raw)}b -> {len(normalized)}b")
+    elif not normalized:
+        logger.error("Normalization returned None")
     return normalized
 
 async def generate_avatar_pose(user, pose_type="dominant"):
@@ -1609,6 +1614,35 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         await query.edit_message_text("❌ Error generating avatar. Check /tmp/avatar_raw_*.bin and the log.")
 
+async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate one avatar and return both raw and normalized bytes as documents."""
+    user_id = update.effective_user.id
+    await update.message.reply_text("Generating debug avatar...")
+    raw = await _request_image(
+        "Beautiful white female, athletic, black hair, medium breasts, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+    )
+    if not raw:
+        await update.message.reply_text("No image returned - check the log.")
+        return
+    try:
+        await context.bot.send_document(
+            chat_id=user_id, document=BytesIO(raw), filename="raw_image",
+            caption=f"RAW | {len(raw)} bytes | header {raw[:12]!r}"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Could not send raw: {e}")
+    norm = await asyncio.to_thread(normalize_for_telegram, raw)
+    if norm:
+        try:
+            await context.bot.send_document(
+                chat_id=user_id, document=BytesIO(norm), filename="normalized.jpg",
+                caption=f"NORMALIZED | {len(norm)} bytes"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Could not send normalized: {e}")
+    else:
+        await update.message.reply_text("Normalize returned None - see log.")
+
 # ============ SCHEDULER ============
 async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("▶️ Enable", callback_data="sched_enable")], [InlineKeyboardButton("⏹️ Disable", callback_data="sched_disable")]]
@@ -1720,6 +1754,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
+    logger.info(f"Image model: {IMAGE_MODEL}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1730,6 +1765,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(CommandHandler("skip", skip_cmd))
+    application.add_handler(CommandHandler("debugavatar", debugavatar_cmd))
     application.add_handler(CommandHandler("gender", gender_cmd))
     application.add_handler(CommandHandler("outfit", outfit_cmd))
     application.add_handler(CommandHandler("wherenow", wherenow_cmd))
