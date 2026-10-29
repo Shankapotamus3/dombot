@@ -601,13 +601,17 @@ def _payload(prompt):
         res = c.get('resolutions') or []
         if res:
             data["resolution"] = "2K" if "2K" in res else (c.get("defaultResolution") if c.get("defaultResolution") in res else res[-1])
-    elif c.get('widthHeightDivisor') or IMAGE_MODEL == "chroma":
-        div = max(1, int(c.get('widthHeightDivisor') or 64))
-        w = int(os.getenv("IMAGE_WIDTH", "896"))
-        h = int(os.getenv("IMAGE_HEIGHT", "1344"))
+    else:
+        div = max(1, int(c.get('widthHeightDivisor') or 8))
+        max_w = int(c.get('maxWidth') or 1280)
+        max_h = int(c.get('maxHeight') or 1280)
+        w = min(int(os.getenv("IMAGE_WIDTH", "832")), max_w)
+        h = min(int(os.getenv("IMAGE_HEIGHT", "1280")), max_h)
         data["width"] = max(div, (w // div) * div)
         data["height"] = max(div, (h // div) * div)
-        data["steps"] = int(os.getenv("IMAGE_STEPS", "42"))
+        step_spec = c.get('steps') or {}
+        max_steps = int(step_spec.get('max') or 10)
+        data["steps"] = min(int(os.getenv("IMAGE_STEPS", str(max_steps))), max_steps)
         data["cfg_scale"] = float(os.getenv("IMAGE_CFG", "6.5"))
     return data
 
