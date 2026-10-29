@@ -18,7 +18,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, filters
 )
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, DateTime, Boolean, Text, desc
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, DateTime, Boolean, Text, desc, or_, func
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ============ CONFIG ============
@@ -30,7 +30,7 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
-IMAGE_MODEL = "chroma"
+IMAGE_MODEL = "grok-imagine-image-quality"
 
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -546,14 +546,20 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
-IMAGE_PAYLOAD_BASE = {"model": IMAGE_MODEL, "width": 768, "height": 1152, "format": "jpeg", "steps": 8, "cfg_scale": 3.5}
+def _payload(prompt):
+    return {
+        "model": IMAGE_MODEL,
+        "prompt": prompt,
+        "width": 768,
+        "height": 1152,
+        "format": "jpeg",
+        "seed": random.randint(1, 1000000),
+    }
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-    data = dict(IMAGE_PAYLOAD_BASE)
-    data["prompt"] = prompt
-    data["seed"] = random.randint(1, 1000000)
-    logger.info(f"Image request: model={data['model']} {data['width']}x{data['height']} steps={data.get('steps')} cfg={data.get('cfg_scale')} fmt={data.get('format')}")
+    data = _payload(prompt)
+    logger.info(f"Image request: model={data['model']} {data['width']}x{data['height']} fmt={data.get('format')}")
     response = await asyncio.to_thread(
         requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
     )
@@ -612,7 +618,7 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, sharp focus, detailed skin, high quality"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
@@ -631,9 +637,9 @@ async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=No
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
         if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, sharp focus, detailed skin, high quality"
         else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, sharp focus, detailed skin, high quality"
         return await _build_and_send(None, prompt, user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -1613,6 +1619,7 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user.avatar_build = build
                 user.avatar_hair = hair
                 user.avatar_genital_size = size
+                user.last_avatar_sent_at = datetime.now(timezone.utc)
                 session.commit()
             cloudinary_result = await upload_to_cloudinary(image_bytes, user_id, image_type='avatar')
             session.add(AvatarImage(user_id=user_id, image_url="generated", cloudinary_url=cloudinary_result['url'] if cloudinary_result else None, cloudinary_public_id=cloudinary_result['public_id'] if cloudinary_result else None, gender=gender, race=race, build=build))
@@ -1629,7 +1636,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
-        "Beautiful white female, athletic, black hair, medium breasts, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+        "Beautiful white female, athletic, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, sharp focus, detailed skin, high quality"
     )
     if not raw:
         await update.message.reply_text("No image returned - check the log.")
@@ -1713,8 +1720,13 @@ async def scheduled_task_check(context: ContextTypes.DEFAULT_TYPE):
                     logger.error(f"Auto-task error: {e}")
         avatar_users = session.query(UserState).filter(
             UserState.avatar_enabled == True,
-            UserState.avatar_gender != None,
-            UserState.last_avatar_sent_at <= now - timedelta(minutes=UserState.avatar_interval_minutes)
+            UserState.avatar_gender.isnot(None),
+            or_(
+                UserState.last_avatar_sent_at.is_(None),
+                UserState.last_avatar_sent_at
+                + func.make_interval(0, 0, 0, 0, 0, UserState.avatar_interval_minutes)
+                <= func.now()
+            )
         ).all()
         for user in avatar_users:
             try:
