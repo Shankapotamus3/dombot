@@ -1725,7 +1725,7 @@ def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.job_queue.run_repeating(
         scheduled_task_check, interval=60, first=10, name="scheduled_check",
-        misfire_grace_time=180, coalesce=True, max_instances=1
+        job_kwargs={"misfire_grace_time": 180, "coalesce": True, "max_instances": 1}
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("test", test_cmd))
