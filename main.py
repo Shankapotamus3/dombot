@@ -175,6 +175,15 @@ def get_session():
     return Session()
 
 # ============ IMAGE HANDLING ============
+def sniff_ext(b):
+    if b[:4] == b'RIFF' and b[8:12] == b'WEBP':
+        return "webp"
+    if b[:3] == b'\xff\xd8\xff':
+        return "jpg"
+    if b[:8] == b'\x89PNG\r\n\x1a\n':
+        return "png"
+    return "bin"
+
 def normalize_for_telegram(image_bytes, max_side=1600):
     """Decode any image format and re-encode as baseline JPEG for Telegram."""
     try:
@@ -184,6 +193,7 @@ def normalize_for_telegram(image_bytes, max_side=1600):
         logger.error(f"Undecodable image: {e}")
         return None
     try:
+        logger.info(f"Decoded image size: {img.size}")
         img = img.convert("RGB")
         img.thumbnail((max_side, max_side), Image.LANCZOS)
         out = BytesIO()
@@ -536,7 +546,7 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
-IMAGE_PAYLOAD_BASE = {"model": IMAGE_MODEL, "width": 832, "height": 1216, "format": "jpeg", "steps": 30, "cfg_scale": 7}
+IMAGE_PAYLOAD_BASE = {"model": IMAGE_MODEL, "width": 768, "height": 1152, "format": "jpeg", "steps": 8, "cfg_scale": 3.5}
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
@@ -1626,7 +1636,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await context.bot.send_document(
-            chat_id=user_id, document=BytesIO(raw), filename="raw_image",
+            chat_id=user_id, document=BytesIO(raw), filename=f"raw_image.{sniff_ext(raw)}",
             caption=f"RAW | {len(raw)} bytes | header {raw[:12]!r}"
         )
     except Exception as e:
