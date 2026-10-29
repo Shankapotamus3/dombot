@@ -11,7 +11,7 @@ import cloudinary.uploader
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageFilter, ImageEnhance, UnidentifiedImageError
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,10 +30,13 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
-IMAGE_MODEL = "grok-imagine-image-quality"
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "chroma").strip()
 MODEL_SPEC = {}
 SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
 NEGATIVE_PROMPT = "blurry, soft focus, bokeh, out of focus, motion blur, low detail, smeared, jpeg artifacts"
+SOFT_WORDS = re.compile(
+    r"\b(soft focus|shallow depth of field|bokeh|dreamy|hazy|misty|film grain|"
+    r"cinematic glow|soft lighting|glowing|ethereal)\b", re.IGNORECASE)
 
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -187,8 +190,8 @@ def sniff_ext(b):
         return "png"
     return "bin"
 
-def normalize_for_telegram(image_bytes, max_side=1600):
-    """Decode any image format and re-encode as baseline JPEG for Telegram."""
+def normalize_for_telegram(image_bytes, max_side=1600, sharpen=True):
+    """Decode any image format, add micro-detail, re-encode as baseline JPEG."""
     try:
         img = Image.open(BytesIO(image_bytes))
         img.load()
@@ -198,9 +201,17 @@ def normalize_for_telegram(image_bytes, max_side=1600):
     try:
         logger.info(f"Decoded image size: {img.size}")
         img = img.convert("RGB")
+        if sharpen:
+            w, h = img.size
+            if max(w, h) < max_side:
+                s = max_side / max(w, h)
+                img = img.resize((max(1, int(w * s)), max(1, int(h * s))), Image.LANCZOS)
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.6, percent=185, threshold=2))
+            img = ImageEnhance.Contrast(img).enhance(1.06)
+            img = ImageEnhance.Sharpness(img).enhance(1.15)
         img.thumbnail((max_side, max_side), Image.LANCZOS)
         out = BytesIO()
-        img.save(out, format="JPEG", quality=92, progressive=False, optimize=True)
+        img.save(out, format="JPEG", quality=95, progressive=False, optimize=True)
         return out.getvalue()
     except Exception as e:
         logger.error(f"Image normalize error: {e}")
@@ -570,6 +581,12 @@ def load_model_spec():
     except Exception as e:
         logger.warning(f"Model spec error: {e}")
 
+def build_prompt(raw_prompt):
+    """Strip soft-vocabulary, then append the sharpness tail. Single entry point."""
+    cleaned = SOFT_WORDS.sub("", raw_prompt)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip().strip(",").strip()
+    return f"{cleaned}, {SHARP_TAIL}"
+
 def _payload(prompt):
     data = {
         "model": IMAGE_MODEL,
@@ -584,14 +601,19 @@ def _payload(prompt):
         res = c.get('resolutions') or []
         if res:
             data["resolution"] = "2K" if "2K" in res else (c.get("defaultResolution") if c.get("defaultResolution") in res else res[-1])
-    elif c.get('widthHeightDivisor'):
-        div = max(1, int(c.get('widthHeightDivisor')))
-        data["width"] = min(1280, max(div, (768 // div) * div))
-        data["height"] = min(1280, max(div, (1152 // div) * div))
+    elif c.get('widthHeightDivisor') or IMAGE_MODEL == "chroma":
+        div = max(1, int(c.get('widthHeightDivisor') or 64))
+        w = int(os.getenv("IMAGE_WIDTH", "896"))
+        h = int(os.getenv("IMAGE_HEIGHT", "1344"))
+        data["width"] = max(div, (w // div) * div)
+        data["height"] = max(div, (h // div) * div)
+        data["steps"] = int(os.getenv("IMAGE_STEPS", "42"))
+        data["cfg_scale"] = float(os.getenv("IMAGE_CFG", "6.5"))
     return data
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
+    prompt = build_prompt(prompt)
     data = _payload(prompt)
     logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
     response = await asyncio.to_thread(
@@ -653,11 +675,11 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, {SHARP_TAIL}"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, {SHARP_TAIL}"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude"
         return await _build_and_send(user, prompt, user.user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -672,9 +694,9 @@ async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=No
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
         if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, {SHARP_TAIL}"
+            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible"
         else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, {SHARP_TAIL}"
+            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible"
         return await _build_and_send(None, prompt, user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -1671,7 +1693,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
-        f"Beautiful white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, {SHARP_TAIL}"
+        "Beautiful white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible"
     )
     if not raw:
         await update.message.reply_text("No image returned - check the log.")
