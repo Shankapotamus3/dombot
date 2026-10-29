@@ -30,7 +30,8 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "chroma").strip()
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2").strip()
+IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "jpeg").strip()
 MODEL_SPEC = {}
 SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
 NEGATIVE_PROMPT = "blurry, soft focus, bokeh, out of focus, motion blur, low detail, smeared, jpeg artifacts"
@@ -190,7 +191,7 @@ def sniff_ext(b):
         return "png"
     return "bin"
 
-def normalize_for_telegram(image_bytes, max_side=1600, sharpen=True):
+def normalize_for_telegram(image_bytes, max_side=1920, sharpen=True):
     """Decode any image format, add micro-detail, re-encode as baseline JPEG."""
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -591,7 +592,7 @@ def _payload(prompt):
     data = {
         "model": IMAGE_MODEL,
         "prompt": prompt,
-        "format": "jpeg",
+        "format": IMAGE_FORMAT,
         "negative_prompt": NEGATIVE_PROMPT,
     }
     c = (MODEL_SPEC.get('constraints') or {})
@@ -615,17 +616,60 @@ def _payload(prompt):
         data["cfg_scale"] = float(os.getenv("IMAGE_CFG", "6.5"))
     return data
 
+def _prune_payload(data, body):
+    """Drop or clamp whatever the endpoint rejected. True if the payload changed."""
+    try:
+        err = json.loads(body)
+    except Exception:
+        return False
+    changed = False
+    issues = err.get('issues') or err.get('errors') or []
+    if not isinstance(issues, list):
+        return False
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        path = issue.get('path') or []
+        keys = list(issue.get('keys') or [])
+        if isinstance(path, list) and path:
+            keys.append(str(path[-1]))
+        if issue.get('code') in ('too_big', 'too_small') and isinstance(path, list) and path:
+            k = str(path[-1])
+            bound = issue.get('maximum') if issue.get('code') == 'too_big' else issue.get('minimum')
+            if k in data and bound is not None:
+                try:
+                    data[k] = type(data[k])(bound)
+                    changed = True
+                    continue
+                except Exception:
+                    pass
+        for k in keys:
+            k = str(k).split('.')[-1]
+            if k in data and k != "prompt":
+                data.pop(k, None)
+                changed = True
+    return changed
+
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     prompt = build_prompt(prompt)
     data = _payload(prompt)
-    logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
-    response = await asyncio.to_thread(
-        requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
-    )
-    logger.info(f"Image API status: {response.status_code}")
-    if response.status_code != 200:
+    response = None
+    for attempt in range(3):
+        logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
+        response = await asyncio.to_thread(
+            requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=180
+        )
+        logger.info(f"Image API status: {response.status_code}")
+        if response.status_code == 200:
+            break
+        if response.status_code == 400 and attempt < 2 and _prune_payload(data, response.text):
+            logger.warning(f"Payload rejected, pruned to {sorted(data.keys())} and retrying: {response.text[:200]}")
+            continue
         logger.error(f"Image API error: {response.status_code} - {response.text[:300]}")
+        return None
+    if not response or response.status_code != 200:
+        logger.error(f"Image API gave up after retries: {response.status_code if response else 'no response'}")
         return None
     result = response.json()
     logger.info(f"Image API keys: {list(result.keys())}")
@@ -635,7 +679,7 @@ async def _request_image(prompt):
     image_data = result['images'][0]
     raw = None
     if isinstance(image_data, str) and image_data.startswith('http'):
-        img_response = await asyncio.to_thread(requests.get, image_data, timeout=30)
+        img_response = await asyncio.to_thread(requests.get, image_data, timeout=60)
         if img_response.status_code == 200:
             raw = img_response.content
     elif isinstance(image_data, str) and image_data.startswith('data:image'):
@@ -1837,7 +1881,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
-    logger.info(f"Image model: {IMAGE_MODEL}")
+    logger.info(f"Image model: {IMAGE_MODEL} | format: {IMAGE_FORMAT}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     load_model_spec()
