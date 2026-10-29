@@ -19,8 +19,7 @@ from telegram.ext import (
     ContextTypes, filters
 )
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, DateTime, Boolean, Text, desc
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ============ CONFIG ============
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -174,8 +173,8 @@ Session = sessionmaker(bind=engine)
 def get_session():
     return Session()
 
-# ============ IMAGE NORMALIZATION ============
-def normalize_for_telegram(image_bytes, max_side=1024):
+# ============ IMAGE HANDLING ============
+def normalize_for_telegram(image_bytes, max_side=1600):
     """Decode any image format and re-encode as baseline JPEG for Telegram."""
     try:
         img = Image.open(BytesIO(image_bytes))
@@ -187,11 +186,18 @@ def normalize_for_telegram(image_bytes, max_side=1024):
         img = img.convert("RGB")
         img.thumbnail((max_side, max_side), Image.LANCZOS)
         out = BytesIO()
-        img.save(out, format="JPEG", quality=88, progressive=False, optimize=True)
+        img.save(out, format="JPEG", quality=92, progressive=False, optimize=True)
         return out.getvalue()
     except Exception as e:
         logger.error(f"Image normalize error: {e}")
         return None
+
+def dump_debug(image_bytes, user_id, kind="raw"):
+    try:
+        with open(f"/tmp/avatar_{kind}_{user_id}.bin", "wb") as f:
+            f.write(image_bytes)
+    except Exception as e:
+        logger.warning(f"Debug dump failed: {e}")
 
 # ============ CLOUDINARY HELPERS ============
 async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', folder='telegram_bot'):
@@ -201,7 +207,8 @@ async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', f
         image_bytes.seek(0)
         timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         public_id = f"{folder}/user_{user_id}/{image_type}_{timestamp}_{random.randint(1000, 9999)}"
-        result = cloudinary.uploader.upload(
+        result = await asyncio.to_thread(
+            cloudinary.uploader.upload,
             image_bytes,
             public_id=public_id,
             resource_type="image",
@@ -211,7 +218,7 @@ async def upload_to_cloudinary(image_bytes, user_id, image_type='user_upload', f
         logger.info(f"Cloudinary upload success: {result.get('public_id')}")
         return {'url': result.get('secure_url'), 'public_id': result.get('public_id'), 'width': result.get('width'), 'height': result.get('height')}
     except Exception as e:
-        logger.error(f"Cloudinary upload error: {e}")
+        logger.error(f"Cloudinary upload error: {type(e).__name__}: {e}")
         return None
 
 # ============ CONSTANTS ============
@@ -332,7 +339,10 @@ async def generate_ai_response(prompt, temperature=0.9):
     try:
         headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
         data = {"model": "claude-opus-4-8-fast", "messages": [{"role": "system", "content": "You are a playful but demanding Domme. Speak with confidence, occasional teasing, and personality. Be conversational, use pet names, mix encouragement with demands."}, {"role": "user", "content": prompt}], "temperature": temperature, "max_tokens": 500}
-        response = requests.post(f"{VENICE_API_URL}/chat/completions", headers=headers, json=data, timeout=30)
+        response = await asyncio.to_thread(
+            requests.post, f"{VENICE_API_URL}/chat/completions",
+            headers=headers, json=data, timeout=30
+        )
         if response.status_code == 200:
             return response.json()['choices'][0]['message']['content']
         logger.error(f"AI error: {response.status_code}")
@@ -371,7 +381,10 @@ VERIFIED: yes/no
 MISSING: <the single most important element not visible, or "none">
 REASON: brief"""
         data = {"model": "claude-opus-4-8-fast", "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}], "max_tokens": 200}
-        response = requests.post(f"{VENICE_API_URL}/chat/completions", headers=headers, json=data, timeout=30)
+        response = await asyncio.to_thread(
+            requests.post, f"{VENICE_API_URL}/chat/completions",
+            headers=headers, json=data, timeout=30
+        )
         if response.status_code == 200:
             return response.json()['choices'][0]['message']['content']
         logger.error(f"Vision error: HTTP {response.status_code} - {response.text[:200]}")
@@ -522,6 +535,57 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
+IMAGE_PAYLOAD_BASE = {"model": "chroma", "width": 832, "height": 1216, "format": "jpeg", "steps": 30, "cfg_scale": 7}
+
+async def _request_image(prompt):
+    headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
+    data = dict(IMAGE_PAYLOAD_BASE)
+    data["prompt"] = prompt
+    data["seed"] = random.randint(1, 1000000)
+    response = await asyncio.to_thread(
+        requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
+    )
+    logger.info(f"Image API status: {response.status_code}")
+    if response.status_code != 200:
+        logger.error(f"Image API error: {response.status_code} - {response.text[:300]}")
+        return None
+    result = response.json()
+    if not result.get('images'):
+        logger.error(f"Image API returned no images: {str(result)[:300]}")
+        return None
+    image_data = result['images'][0]
+    raw = None
+    if isinstance(image_data, str) and image_data.startswith('http'):
+        img_response = await asyncio.to_thread(requests.get, image_data, timeout=30)
+        if img_response.status_code == 200:
+            raw = img_response.content
+    elif isinstance(image_data, str) and image_data.startswith('data:image'):
+        raw = base64.b64decode(image_data.split(',')[1])
+    elif isinstance(image_data, str):
+        try:
+            raw = base64.b64decode(image_data)
+        except Exception as e:
+            logger.error(f"Base64 decode failed: {e}")
+            return None
+    elif isinstance(image_data, bytes):
+        raw = image_data
+    if not raw:
+        logger.error("No image data extracted")
+        return None
+    return raw
+
+async def _build_and_send(user, prompt, user_id=None):
+    raw = await _request_image(prompt)
+    if not raw:
+        return None
+    if user_id:
+        await asyncio.to_thread(dump_debug, raw, user_id, "raw")
+    normalized = await asyncio.to_thread(normalize_for_telegram, raw)
+    if normalized and user_id:
+        await asyncio.to_thread(dump_debug, normalized, user_id, "norm")
+        logger.info(f"Raw {len(raw)}b -> normalized {len(normalized)}b")
+    return normalized
+
 async def generate_avatar_pose(user, pose_type="dominant"):
     try:
         gender = user.avatar_gender or user.gender or "female"
@@ -533,47 +597,31 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, high quality, detailed skin"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, sharp focus, detailed skin, high quality"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, high quality"
-        headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {"model": "chroma", "prompt": prompt, "width": 512, "height": 768, "format": "jpeg", "seed": random.randint(1, 1000000)}
-        response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
-        logger.info(f"Image API status: {response.status_code}")
-        if response.status_code == 200:
-            result = response.json()
-            if 'images' in result and result['images']:
-                image_data = result['images'][0]
-                raw = None
-                if isinstance(image_data, str) and image_data.startswith('http'):
-                    img_response = requests.get(image_data, timeout=30)
-                    if img_response.status_code == 200:
-                        raw = img_response.content
-                    else:
-                        logger.error(f"Failed to download: {img_response.status_code}")
-                        return None
-                elif isinstance(image_data, str) and image_data.startswith('data:image'):
-                    raw = base64.b64decode(image_data.split(',')[1])
-                elif isinstance(image_data, str):
-                    try:
-                        raw = base64.b64decode(image_data)
-                    except Exception as e:
-                        logger.error(f"Failed to decode base64: {e}")
-                        return None
-                elif isinstance(image_data, bytes):
-                    raw = image_data
-                if not raw:
-                    logger.error("No image data extracted")
-                    return None
-                return normalize_for_telegram(raw)
-        logger.error(f"Image API error: {response.status_code} - {response.text[:200]}")
-        return None
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, sharp focus, detailed skin, high quality"
+        return await _build_and_send(user, prompt, user.user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        return None
+
+async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=None):
+    try:
+        gender_desc = AVATAR_GENDERS[gender]['desc']
+        race_desc = AVATAR_RACES[race]['name'].split('/')[0]
+        build_desc = AVATAR_BUILDS[build]['desc']
+        size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
+        if gender == "trans":
+            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+        else:
+            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, sharp focus, detailed skin, high quality"
+        return await _build_and_send(None, prompt, user_id)
+    except Exception as e:
+        logger.error(f"Avatar error: {e}")
         return None
 
 async def send_avatar_photo(context, chat_id, image_bytes, caption):
@@ -1539,7 +1587,7 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     build = context.user_data.get('avatar_build')
     hair = context.user_data.get('avatar_hair')
     await query.edit_message_text("🎨 Generating avatar...")
-    image_bytes = await generate_avatar_pose_image(gender, race, build, hair, size)
+    image_bytes = await generate_avatar_pose_image(gender, race, build, hair, size, user_id)
     if image_bytes:
         session = get_session()
         try:
@@ -1559,46 +1607,7 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         finally:
             session.close()
     else:
-        await query.edit_message_text("❌ Error generating avatar.")
-
-async def generate_avatar_pose_image(gender, race, build, hair, size):
-    try:
-        gender_desc = AVATAR_GENDERS[gender]['desc']
-        race_desc = AVATAR_RACES[race]['name'].split('/')[0]
-        build_desc = AVATAR_BUILDS[build]['desc']
-        size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
-        if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
-        else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, high quality"
-        headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
-        data = {"model": "chroma", "prompt": prompt, "width": 512, "height": 768, "format": "jpeg", "seed": random.randint(1, 1000000)}
-        response = requests.post(VENICE_IMAGE_URL, headers=headers, json=data, timeout=60)
-        if response.status_code == 200:
-            result = response.json()
-            if 'images' in result and result['images']:
-                image_data = result['images'][0]
-                raw = None
-                if isinstance(image_data, str) and image_data.startswith('http'):
-                    img_response = requests.get(image_data, timeout=30)
-                    if img_response.status_code == 200:
-                        raw = img_response.content
-                elif isinstance(image_data, str) and image_data.startswith('data:image'):
-                    raw = base64.b64decode(image_data.split(',')[1])
-                elif isinstance(image_data, str):
-                    try:
-                        raw = base64.b64decode(image_data)
-                    except Exception:
-                        raw = None
-                elif isinstance(image_data, bytes):
-                    raw = image_data
-                return normalize_for_telegram(raw) if raw else None
-        else:
-            logger.error(f"Avatar API error: {response.status_code} - {response.text[:200]}")
-        return None
-    except Exception as e:
-        logger.error(f"Avatar error: {e}")
-        return None
+        await query.edit_message_text("❌ Error generating avatar. Check /tmp/avatar_raw_*.bin and the log.")
 
 # ============ SCHEDULER ============
 async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1711,9 +1720,13 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
+    logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.job_queue.run_repeating(scheduled_task_check, interval=60, first=10, name="scheduled_check")
+    application.job_queue.run_repeating(
+        scheduled_task_check, interval=60, first=10, name="scheduled_check",
+        misfire_grace_time=180, coalesce=True, max_instances=1
+    )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(CommandHandler("skip", skip_cmd))
