@@ -31,6 +31,7 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 IMAGE_MODEL = "grok-imagine-image-quality"
+MODEL_SPEC = {}
 
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -546,18 +547,46 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
+def load_model_spec():
+    """Fetch this model's constraints once so the payload matches its sizing idiom."""
+    try:
+        r = await_ = requests.get(
+            f"{VENICE_API_URL}/models?type=image",
+            headers={"Authorization": f"Bearer {VENICE_API_KEY}"}, timeout=30
+        )
+        if r.status_code != 200:
+            logger.warning(f"Model spec fetch failed: HTTP {r.status_code}")
+            return
+        payload = r.json()
+        models = payload.get('data') or payload
+        for m in models:
+            if m.get('id') == IMAGE_MODEL:
+                MODEL_SPEC.update(m.get('model_spec') or {})
+                logger.info(f"Model spec for {IMAGE_MODEL}: {json.dumps(MODEL_SPEC)[:800]}")
+                return
+        logger.warning(f"{IMAGE_MODEL} not present in model list")
+    except Exception as e:
+        logger.warning(f"Model spec error: {e}")
+
 def _payload(prompt):
-    return {
-        "model": IMAGE_MODEL,
-        "prompt": prompt,
-        "aspect_ratio": "2:3",
-        "resolution": "1K",
-    }
+    data = {"model": IMAGE_MODEL, "prompt": prompt, "output_format": "jpeg"}
+    c = (MODEL_SPEC.get('constraints') or {})
+    ratios = c.get('aspectRatios') or []
+    if ratios:
+        data["aspect_ratio"] = "2:3" if "2:3" in ratios else c.get("defaultAspectRatio", ratios[0])
+        res = c.get('resolutions') or []
+        if res:
+            data["resolution"] = c.get("defaultResolution") if c.get("defaultResolution") in res else res[0]
+    elif c.get('widthHeightDivisor'):
+        div = max(1, int(c.get('widthHeightDivisor')))
+        data["width"] = min(1280, max(div, (768 // div) * div))
+        data["height"] = min(1280, max(div, (1152 // div) * div))
+    return data
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     data = _payload(prompt)
-    logger.info(f"Image request: model={data['model']} ratio={data.get('aspect_ratio')} res={data.get('resolution')}")
+    logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k != 'prompt'})}")
     response = await asyncio.to_thread(
         requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
     )
@@ -821,7 +850,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
-            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\n\nTry saying 'hi' to test conversation!")
+            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nspec: {json.dumps(MODEL_SPEC)[:300]}\n\nTry saying 'hi' to test conversation!")
         else:
             await update.message.reply_text("No user record found")
     finally:
@@ -1778,6 +1807,7 @@ def main():
     logger.info(f"Image model: {IMAGE_MODEL}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
+    load_model_spec()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.job_queue.run_repeating(
         scheduled_task_check, interval=60, first=10, name="scheduled_check",
