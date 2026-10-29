@@ -30,9 +30,11 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
-IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-2").strip()
+IMAGE_MODEL = os.getenv("IMAGE_MODEL", "z-image-turbo").strip()
+IMAGE_FALLBACKS = [m.strip() for m in os.getenv("IMAGE_FALLBACKS", "chroma").split(",") if m.strip()]
 IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "jpeg").strip()
 MODEL_SPEC = {}
+MODEL_SPECS = {}
 SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
 NEGATIVE_PROMPT = "blurry, soft focus, bokeh, out of focus, motion blur, low detail, smeared, jpeg artifacts"
 SOFT_WORDS = re.compile(
@@ -561,26 +563,35 @@ SETTING: <the setting, 2-5 words>"""
     return fallbacks.get(actual_risk, fallbacks[1]), actual_risk
 
 # ============ AVATAR ============
-def load_model_spec():
-    """Fetch this model's constraints once so the payload matches its sizing idiom."""
+def get_spec(model):
+    """Per-model constraints, fetched once and cached."""
+    if model in MODEL_SPECS:
+        return MODEL_SPECS[model]
+    spec = {}
     try:
         r = requests.get(
             f"{VENICE_API_URL}/models?type=image",
             headers={"Authorization": f"Bearer {VENICE_API_KEY}"}, timeout=30
         )
-        if r.status_code != 200:
+        if r.status_code == 200:
+            payload = r.json()
+            for m in (payload.get('data') or payload):
+                if m.get('id') == model:
+                    spec = m.get('model_spec') or {}
+                    break
+        else:
             logger.warning(f"Model spec fetch failed: HTTP {r.status_code}")
-            return
-        payload = r.json()
-        models = payload.get('data') or payload
-        for m in models:
-            if m.get('id') == IMAGE_MODEL:
-                MODEL_SPEC.update(m.get('model_spec') or {})
-                logger.info(f"Model spec for {IMAGE_MODEL}: {json.dumps(MODEL_SPEC)[:800]}")
-                return
-        logger.warning(f"{IMAGE_MODEL} not present in model list")
     except Exception as e:
-        logger.warning(f"Model spec error: {e}")
+        logger.warning(f"Model spec error for {model}: {e}")
+    MODEL_SPECS[model] = spec
+    logger.info(f"Spec {model}: {json.dumps(spec)[:400]}")
+    if model == IMAGE_MODEL:
+        MODEL_SPEC.clear()
+        MODEL_SPEC.update(spec)
+    return spec
+
+def load_model_spec():
+    get_spec(IMAGE_MODEL)
 
 def build_prompt(raw_prompt):
     """Strip soft-vocabulary, then append the sharpness tail. Single entry point."""
@@ -588,14 +599,14 @@ def build_prompt(raw_prompt):
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip().strip(",").strip()
     return f"{cleaned}, {SHARP_TAIL}"
 
-def _payload(prompt):
+def _payload(prompt, model):
     data = {
-        "model": IMAGE_MODEL,
+        "model": model,
         "prompt": prompt,
         "format": IMAGE_FORMAT,
         "negative_prompt": NEGATIVE_PROMPT,
     }
-    c = (MODEL_SPEC.get('constraints') or {})
+    c = (get_spec(model).get('constraints') or {})
     ratios = c.get('aspectRatios') or []
     if ratios:
         data["aspect_ratio"] = "2:3" if "2:3" in ratios else c.get("defaultAspectRatio", ratios[0])
@@ -650,53 +661,51 @@ def _prune_payload(data, body):
                 changed = True
     return changed
 
+def _extract_bytes(result):
+    if not result.get('images'):
+        return None
+    image_data = result['images'][0]
+    if isinstance(image_data, bytes):
+        return image_data
+    if not isinstance(image_data, str):
+        return None
+    if image_data.startswith('http'):
+        r = requests.get(image_data, timeout=60)
+        return r.content if r.status_code == 200 else None
+    if image_data.startswith('data:image'):
+        return base64.b64decode(image_data.split(',')[1])
+    try:
+        return base64.b64decode(image_data)
+    except Exception:
+        return None
+
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     prompt = build_prompt(prompt)
-    data = _payload(prompt)
-    response = None
-    for attempt in range(3):
-        logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
-        response = await asyncio.to_thread(
-            requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=180
-        )
-        logger.info(f"Image API status: {response.status_code}")
-        if response.status_code == 200:
+    chain = [IMAGE_MODEL] + [m for m in IMAGE_FALLBACKS if m != IMAGE_MODEL]
+    for model in chain:
+        data = _payload(prompt, model)
+        for attempt in range(3):
+            logger.info(f"Image payload [{model}]: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
+            response = await asyncio.to_thread(
+                requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=180
+            )
+            logger.info(f"Image API status [{model}]: {response.status_code}")
+            if response.status_code == 200:
+                result = response.json()
+                raw = await asyncio.to_thread(_extract_bytes, result)
+                if not raw:
+                    logger.error(f"No image data from {model}: {str(result)[:300]}")
+                    break
+                logger.info(f"Raw image from {model}: {len(raw)} bytes, header {raw[:12]!r}")
+                return raw
+            if response.status_code == 400 and attempt < 2 and _prune_payload(data, response.text):
+                logger.warning(f"[{model}] rejected, pruned to {sorted(data.keys())}: {response.text[:200]}")
+                continue
+            logger.error(f"Image API error [{model}]: {response.status_code} - {response.text[:300]}")
             break
-        if response.status_code == 400 and attempt < 2 and _prune_payload(data, response.text):
-            logger.warning(f"Payload rejected, pruned to {sorted(data.keys())} and retrying: {response.text[:200]}")
-            continue
-        logger.error(f"Image API error: {response.status_code} - {response.text[:300]}")
-        return None
-    if not response or response.status_code != 200:
-        logger.error(f"Image API gave up after retries: {response.status_code if response else 'no response'}")
-        return None
-    result = response.json()
-    logger.info(f"Image API keys: {list(result.keys())}")
-    if not result.get('images'):
-        logger.error(f"Image API returned no images: {str(result)[:400]}")
-        return None
-    image_data = result['images'][0]
-    raw = None
-    if isinstance(image_data, str) and image_data.startswith('http'):
-        img_response = await asyncio.to_thread(requests.get, image_data, timeout=60)
-        if img_response.status_code == 200:
-            raw = img_response.content
-    elif isinstance(image_data, str) and image_data.startswith('data:image'):
-        raw = base64.b64decode(image_data.split(',')[1])
-    elif isinstance(image_data, str):
-        try:
-            raw = base64.b64decode(image_data)
-        except Exception as e:
-            logger.error(f"Base64 decode failed: {e}")
-            return None
-    elif isinstance(image_data, bytes):
-        raw = image_data
-    if not raw:
-        logger.error(f"No image data extracted. Response preview: {str(result)[:400]}")
-        return None
-    logger.info(f"Raw image received: {len(raw)} bytes, header {raw[:12]!r}")
-    return raw
+    logger.error(f"All image models failed: {chain}")
+    return None
 
 async def _build_and_send(user, prompt, user_id=None):
     raw = await _request_image(prompt)
@@ -927,7 +936,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
-            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
+            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nmodel: {IMAGE_MODEL} -> {IMAGE_FALLBACKS}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
         else:
             await update.message.reply_text("No user record found")
     finally:
@@ -1881,7 +1890,7 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
-    logger.info(f"Image model: {IMAGE_MODEL} | format: {IMAGE_FORMAT}")
+    logger.info(f"Image model: {IMAGE_MODEL} | fallbacks: {IMAGE_FALLBACKS} | format: {IMAGE_FORMAT}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     load_model_spec()
