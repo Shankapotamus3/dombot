@@ -30,9 +30,11 @@ VENICE_API_KEY = os.getenv('VENICE_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
 VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
+VENICE_UPSCALE_URL = "https://api.venice.ai/api/v1/image/upscale"
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "z-image-turbo").strip()
 IMAGE_FALLBACKS = [m.strip() for m in os.getenv("IMAGE_FALLBACKS", "chroma").split(",") if m.strip()]
 IMAGE_FORMAT = os.getenv("IMAGE_FORMAT", "jpeg").strip()
+IMAGE_UPSCALE = os.getenv("IMAGE_UPSCALE", "2").strip()
 MODEL_SPEC = {}
 MODEL_SPECS = {}
 SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
@@ -707,12 +709,38 @@ async def _request_image(prompt):
     logger.error(f"All image models failed: {chain}")
     return None
 
+async def _upscale(raw):
+    """Add real detail server-side before any Pillow work. Falls back to the raw bytes."""
+    if IMAGE_UPSCALE in ("off", "0", ""):
+        return raw
+    try:
+        payload = {
+            "image": base64.b64encode(raw).decode("utf-8"),
+            "scale": int(IMAGE_UPSCALE),
+            "creativity": float(os.getenv("IMAGE_UPSCALE_CREATIVITY", "0.01")),
+        }
+        r = await asyncio.to_thread(
+            requests.post, VENICE_UPSCALE_URL,
+            headers={"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"},
+            json=payload, timeout=180
+        )
+        logger.info(f"Upscale status: {r.status_code}")
+        if r.status_code != 200:
+            logger.warning(f"Upscale failed, keeping raw: {r.status_code} - {r.text[:200]}")
+            return raw
+        logger.info(f"Upscaled {len(raw)}b -> {len(r.content)}b ({r.headers.get('content-type')})")
+        return r.content
+    except Exception as e:
+        logger.warning(f"Upscale error, keeping raw: {e}")
+        return raw
+
 async def _build_and_send(user, prompt, user_id=None):
     raw = await _request_image(prompt)
     if not raw:
         return None
     if user_id:
         await asyncio.to_thread(dump_debug, raw, user_id, "raw")
+    raw = await _upscale(raw)
     normalized = await asyncio.to_thread(normalize_for_telegram, raw)
     if normalized and user_id:
         await asyncio.to_thread(dump_debug, normalized, user_id, "norm")
@@ -936,7 +964,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
-            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nmodel: {IMAGE_MODEL} -> {IMAGE_FALLBACKS}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
+            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nmodel: {IMAGE_MODEL} -> {IMAGE_FALLBACKS}\nformat: {IMAGE_FORMAT} | upscale: {IMAGE_UPSCALE}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
         else:
             await update.message.reply_text("No user record found")
     finally:
@@ -1746,7 +1774,7 @@ async def avatar_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("❌ Error generating avatar. Check /tmp/avatar_raw_*.bin and the log.")
 
 async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate one avatar and return both raw and normalized bytes as documents."""
+    """Generate one avatar and return raw, upscaled and normalized bytes as documents."""
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
@@ -1762,7 +1790,16 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.message.reply_text(f"Could not send raw: {e}")
-    norm = await asyncio.to_thread(normalize_for_telegram, raw)
+    up = await _upscale(raw)
+    if up is not raw:
+        try:
+            await context.bot.send_document(
+                chat_id=user_id, document=BytesIO(up), filename=f"upscaled.{sniff_ext(up)}",
+                caption=f"UPSCALED | {len(up)} bytes"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"Could not send upscaled: {e}")
+    norm = await asyncio.to_thread(normalize_for_telegram, up)
     if norm:
         try:
             await context.bot.send_document(
@@ -1890,7 +1927,8 @@ async def reset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     logger.info("=" * 60)
     logger.info("BOT STARTING")
-    logger.info(f"Image model: {IMAGE_MODEL} | fallbacks: {IMAGE_FALLBACKS} | format: {IMAGE_FORMAT}")
+    logger.info(f"Image model: {IMAGE_MODEL} | fallbacks: {IMAGE_FALLBACKS}")
+    logger.info(f"Format: {IMAGE_FORMAT} | Upscale: {IMAGE_UPSCALE}")
     logger.info(f"Cloudinary configured: {bool(os.getenv('CLOUDINARY_CLOUD_NAME'))} / {bool(os.getenv('CLOUDINARY_API_KEY'))} / {bool(os.getenv('CLOUDINARY_API_SECRET'))}")
     logger.info("=" * 60)
     load_model_spec()
@@ -1941,7 +1979,11 @@ def main():
     application.add_handler(CallbackQueryHandler(mercy_callback, pattern="^mercy_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input_dispatcher))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        bootstrap_retries=5,
+    )
 
 if __name__ == "__main__":
     main()
