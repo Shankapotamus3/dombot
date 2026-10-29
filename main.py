@@ -550,16 +550,14 @@ def _payload(prompt):
     return {
         "model": IMAGE_MODEL,
         "prompt": prompt,
-        "width": 768,
-        "height": 1152,
-        "format": "jpeg",
-        "seed": random.randint(1, 1000000),
+        "aspect_ratio": "2:3",
+        "resolution": "1K",
     }
 
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     data = _payload(prompt)
-    logger.info(f"Image request: model={data['model']} {data['width']}x{data['height']} fmt={data.get('format')}")
+    logger.info(f"Image request: model={data['model']} ratio={data.get('aspect_ratio')} res={data.get('resolution')}")
     response = await asyncio.to_thread(
         requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
     )
@@ -568,8 +566,9 @@ async def _request_image(prompt):
         logger.error(f"Image API error: {response.status_code} - {response.text[:300]}")
         return None
     result = response.json()
+    logger.info(f"Image API keys: {list(result.keys())}")
     if not result.get('images'):
-        logger.error(f"Image API returned no images: {str(result)[:300]}")
+        logger.error(f"Image API returned no images: {str(result)[:400]}")
         return None
     image_data = result['images'][0]
     raw = None
@@ -588,7 +587,7 @@ async def _request_image(prompt):
     elif isinstance(image_data, bytes):
         raw = image_data
     if not raw:
-        logger.error("No image data extracted")
+        logger.error(f"No image data extracted. Response preview: {str(result)[:400]}")
         return None
     logger.info(f"Raw image received: {len(raw)} bytes, header {raw[:12]!r}")
     return raw
