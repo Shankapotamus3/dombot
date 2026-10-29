@@ -32,6 +32,8 @@ VENICE_API_URL = "https://api.venice.ai/api/v1"
 VENICE_IMAGE_URL = "https://api.venice.ai/api/v1/image/generate"
 IMAGE_MODEL = "grok-imagine-image-quality"
 MODEL_SPEC = {}
+SHARP_TAIL = "tack sharp focus, crisp skin detail, whole body in focus, deep depth of field, no bokeh, studio lighting, 8k photograph"
+NEGATIVE_PROMPT = "blurry, soft focus, bokeh, out of focus, motion blur, low detail, smeared, jpeg artifacts"
 
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -569,14 +571,19 @@ def load_model_spec():
         logger.warning(f"Model spec error: {e}")
 
 def _payload(prompt):
-    data = {"model": IMAGE_MODEL, "prompt": prompt, "format": "jpeg"}
+    data = {
+        "model": IMAGE_MODEL,
+        "prompt": prompt,
+        "format": "jpeg",
+        "negative_prompt": NEGATIVE_PROMPT,
+    }
     c = (MODEL_SPEC.get('constraints') or {})
     ratios = c.get('aspectRatios') or []
     if ratios:
         data["aspect_ratio"] = "2:3" if "2:3" in ratios else c.get("defaultAspectRatio", ratios[0])
         res = c.get('resolutions') or []
         if res:
-            data["resolution"] = c.get("defaultResolution") if c.get("defaultResolution") in res else res[0]
+            data["resolution"] = "2K" if "2K" in res else (c.get("defaultResolution") if c.get("defaultResolution") in res else res[-1])
     elif c.get('widthHeightDivisor'):
         div = max(1, int(c.get('widthHeightDivisor')))
         data["width"] = min(1280, max(div, (768 // div) * div))
@@ -586,7 +593,7 @@ def _payload(prompt):
 async def _request_image(prompt):
     headers = {"Authorization": f"Bearer {VENICE_API_KEY}", "Content-Type": "application/json"}
     data = _payload(prompt)
-    logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k != 'prompt'})}")
+    logger.info(f"Image payload: {json.dumps({k: v for k, v in data.items() if k not in ('prompt', 'negative_prompt')})}")
     response = await asyncio.to_thread(
         requests.post, VENICE_IMAGE_URL, headers=headers, json=data, timeout=90
     )
@@ -646,11 +653,11 @@ async def generate_avatar_pose(user, pose_type="dominant"):
         build_desc = AVATAR_BUILDS.get(build, AVATAR_BUILDS["curvy"])["desc"]
         size_desc = AVATAR_SIZES.get(size, AVATAR_SIZES["medium"]).get(gender, AVATAR_SIZES["medium"]["female"])
         if pose_type == "reward":
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, completely nude, erotic submissive pose, genitals not clearly visible, {SHARP_TAIL}"
         else:
             pose = random.choice(DOMINANT_POSES)
             outfit = random.choice(DOMINANT_OUTFITS)
-            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful {race_desc} {gender}, {build_desc}, {hair} hair, {size_desc}, wearing {outfit}, {pose}, dominant attitude, {SHARP_TAIL}"
         return await _build_and_send(user, prompt, user.user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -665,9 +672,9 @@ async def generate_avatar_pose_image(gender, race, build, hair, size, user_id=No
         build_desc = AVATAR_BUILDS[build]['desc']
         size_desc = AVATAR_SIZES[size].get(gender, AVATAR_SIZES[size]['female'])
         if gender == "trans":
-            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful feminine {race_desc} trans woman, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, {SHARP_TAIL}"
         else:
-            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, sharp focus, detailed skin, high quality"
+            prompt = f"Beautiful {race_desc} {gender_desc}, {build_desc}, {hair} hair, {size_desc}, nude, erotic pose, submissive, genitals not clearly visible, {SHARP_TAIL}"
         return await _build_and_send(None, prompt, user_id)
     except Exception as e:
         logger.error(f"Avatar error: {e}")
@@ -850,7 +857,7 @@ async def test_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = session.query(UserState).filter_by(user_id=user_id).first()
         if user:
-            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nspec: {json.dumps(MODEL_SPEC)[:300]}\n\nTry saying 'hi' to test conversation!")
+            await update.message.reply_text(f"✅ Bot is working!\n\nflags: outfit={user.awaiting_custom_outfit}/{user.awaiting_outfit_detail}, loc={user.awaiting_custom_location}/{user.awaiting_location_detail}, interval={user.awaiting_interval}\n\nlocation: {user.custom_location or 'Not set'}\ndetail: {user.location_detail or 'none'}\noutfit: {user.outfit_detail or 'none'}\nspec: {json.dumps(MODEL_SPEC)[:400]}\n\nTry saying 'hi' to test conversation!")
         else:
             await update.message.reply_text("No user record found")
     finally:
@@ -1664,7 +1671,7 @@ async def debugavatar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text("Generating debug avatar...")
     raw = await _request_image(
-        "Beautiful white female, athletic, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, sharp focus, detailed skin, high quality"
+        f"Beautiful white female, athletic build, black hair, medium breasts, nude, erotic pose, genitals not clearly visible, {SHARP_TAIL}"
     )
     if not raw:
         await update.message.reply_text("No image returned - check the log.")
