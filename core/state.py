@@ -1,6 +1,6 @@
 # core/state.py
-import os, json, logging
-from datetime import datetime, timezone
+import os, json, random, logging
+from datetime import datetime, timezone, timedelta
 from sqlalchemy import (create_engine, Column, Integer, BigInteger, String, DateTime,
                         Boolean, Text, inspect, text as sqltext)
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -44,7 +44,7 @@ class UserState(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     last_task_at = Column(DateTime(timezone=True), nullable=True)
     next_task_time = Column(DateTime(timezone=True), nullable=True)
-    scheduling_enabled = Column(Boolean, default=False)
+    scheduling_enabled = Column(Boolean, default=True)
     min_interval = Column(Integer, default=30)
     max_interval = Column(Integer, default=180)
     avatar_url = Column(Text, nullable=True)
@@ -56,7 +56,7 @@ class UserState(Base):
     challenges_since_reward = Column(Integer, default=0)
     last_avatar_sent_at = Column(DateTime(timezone=True), nullable=True)
     avatar_interval_minutes = Column(Integer, default=60)
-    avatar_enabled = Column(Boolean, default=True)
+    avatar_enabled = Column(Boolean, default=False)
     kink_exposure = Column(String(10), default="okay")
     kink_humiliation = Column(String(10), default="okay")
     kink_degradation = Column(String(10), default="okay")
@@ -142,7 +142,7 @@ def _url():
     return url
 
 
-engine = create_engine(_url(), pool_pre_ping=True)
+engine = create_engine(_url(), pool_pre_ping=True, pool_size=10, max_overflow=20, pool_recycle=300)
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
@@ -153,25 +153,19 @@ def get_session():
 
 def ensure_schema():
     insp = inspect(engine)
-    tables = set(insp.get_table_names())
-    additions = {
-        "tasks": {"sharpness": "INTEGER"},
-        "user_states": {
-            "variant": "VARCHAR(20)", "features": "TEXT", "venue": "VARCHAR(50)",
-            "pending": "VARCHAR(50)", "reward_model": "VARCHAR(50)", "task_model": "VARCHAR(50)",
-            "rooms": "TEXT", "risk_pre_kids": "INTEGER", "recent_settings": "TEXT",
-            "location_probes": "TEXT",
-        },
-    }
+    existing = set(insp.get_table_names())
     with engine.begin() as conn:
-        for table, cols in additions.items():
-            if table not in tables:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing:
                 continue
-            have = {c["name"] for c in insp.get_columns(table)}
-            for col, ddl in cols.items():
-                if col not in have:
-                    logger.warning(f"migrating: {table}.{col}")
-                    conn.execute(sqltext(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}"))
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in have:
+                    continue
+                ddl = column.type.compile(engine.dialect)
+                logger.warning(f"migrating: {table.name}.{column.name}")
+                conn.execute(sqltext(
+                    f'ALTER TABLE {table.name} ADD COLUMN IF NOT EXISTS "{column.name}" {ddl}'))
 
 
 _PERSIST = {
@@ -195,10 +189,8 @@ _PERSIST = {
     "avatar_enabled": "avatar_enabled", "avatar_interval_minutes": "avatar_interval_minutes",
     "last_avatar_sent_at": "last_avatar_sent_at",
 }
-for _k in ("exposure", "humiliation", "degradation", "bondage", "pain", "service", "edging",
-           "watersports", "exhibitionism", "roleplay", "petplay", "feminization", "cbt",
-           "breathplay", "sensory", "temperature", "marking", "spanking", "nipple", "anal",
-           "gags", "social_media"):
+
+for _k in ("exposure", "humiliation", "degradation", "bondage", "pain", "service", "edging", "watersports", "exhibitionism", "roleplay", "petplay", "feminization", "cbt", "breathplay", "sensory", "temperature", "marking", "spanking", "nipple", "anal", "gags", "social_media"):
     _PERSIST[f"kink_{_k}"] = f"kink_{_k}"
 
 _JSON = {"rooms", "probes", "features", "recent_settings", "last_kinks_used", "outfit_items"}
@@ -255,7 +247,9 @@ def get_state(user_id):
     session = get_session()
     row = session.query(UserState).filter_by(user_id=user_id).first()
     if not row:
-        row = UserState(user_id=user_id, username="")
+        row = UserState(
+            user_id=user_id, username="",
+            next_task_time=datetime.now(timezone.utc) + timedelta(minutes=random.randint(30, 180)))
         session.add(row)
         session.commit()
     view = StateView(row, session)
