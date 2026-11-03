@@ -5,9 +5,8 @@ os.environ.setdefault("IMAGE_FALLBACKS", "chroma")
 os.environ.setdefault("TEXT_MODEL", "claude-opus-4-8-fast")
 os.environ.setdefault("IMAGE_ASPECT", "3:4")
 
-import io, re, json, time, base64, random, logging, asyncio
+import json, random, logging, asyncio
 from datetime import datetime, timezone, timedelta
-from io import BytesIO
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
@@ -127,26 +126,87 @@ def present_keyboard():
                                  for k, o in tk.CONTEXT_OPTIONS.items()])
 
 
-def privacy_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Private", callback_data="privacy_private")],
-                                 [InlineKeyboardButton("Semi-private", callback_data="privacy_semi")],
-                                 [InlineKeyboardButton("Exposed", callback_data="privacy_exposed")],
-                                 [InlineKeyboardButton("Public", callback_data="privacy_public")]])
+def privacy_keyboard(selected=None):
+    levels = ["private", "semi", "exposed", "public"]
+    return InlineKeyboardMarkup([[InlineKeyboardButton(("Y " if lv == selected else "") + lv,
+                                                      callback_data=f"privacy_{lv}")] for lv in levels])
 
 
 def kinks_keyboard(state):
-    rows = []
-    for key, (name, _) in tk.KINK_CATEGORIES.items():
-        rows.append([InlineKeyboardButton(f"{tk.KINK_LEVELS[state.get(key) or 'okay']['emoji']} {name}",
-                                          callback_data=f"kinkmenu_{key}")])
+    rows = [[InlineKeyboardButton(f"{tk.KINK_LEVELS[state.get(k) or 'okay']['emoji']} {n}",
+                                  callback_data=f"kinkmenu_{k}")]
+            for k, (n, _) in tk.KINK_CATEGORIES.items()]
     rows.append([InlineKeyboardButton("Done", callback_data="kinks_done")])
     return InlineKeyboardMarkup(rows)
 
 
-def room_keyboard(loc, selected):
-    rows = [[InlineKeyboardButton(("Y " if k in selected else "") + lbl, callback_data=f"probe_{k}")]
-            for k, lbl in venue.probe_options(loc, [])[:0]] or []
+def venue_keyboard():
+    rows, row = [], []
+    for key, label in [("home", "Home"), ("hotel", "Hotel"), ("office", "Office"),
+                       ("gym", "Gym"), ("pool", "Pool"), ("beach", "Beach"),
+                       ("park", "Park"), ("bar", "Bar"), ("car", "Car"),
+                       ("store", "Store"), ("work", "Work")]:
+        row.append(InlineKeyboardButton(label, callback_data=f"venue_{key}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Somewhere else", callback_data="venue_custom")])
     return InlineKeyboardMarkup(rows)
+
+
+def room_keyboard(venue_name, selected):
+    rows = [[InlineKeyboardButton(("Y " if r in selected else "") + r.title(),
+                                  callback_data=f"room_{i}")]
+            for i, r in enumerate(venue.rooms_for_venue(venue_name))]
+    rows.append([InlineKeyboardButton("Add a room", callback_data="room_custom"),
+                 InlineKeyboardButton("That's the lot", callback_data="room_done")])
+    return InlineKeyboardMarkup(rows)
+
+
+def present_feature_keyboard(venue_name, rooms, selected):
+    rows, row = [], []
+    for ri, room in enumerate(rooms):
+        for fi, feature in enumerate(venue.present_features(venue_name, room)):
+            row.append(InlineKeyboardButton(("Y " if feature in selected else "") + feature[:18],
+                                            callback_data=f"pf_{ri}_{fi}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Add my own", callback_data="pf_custom"),
+                 InlineKeyboardButton("Done", callback_data="pf_done")])
+    return InlineKeyboardMarkup(rows)
+
+
+def probe_keyboard(pool, selected):
+    rows, row = [], []
+    for i, item in enumerate(pool):
+        row.append(InlineKeyboardButton(("Y " if item in selected else "") + item[:18],
+                                        callback_data=f"probe_{i}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Add my own", callback_data="probe_custom"),
+                 InlineKeyboardButton("Done", callback_data="probe_done")])
+    return InlineKeyboardMarkup(rows)
+
+
+def autopics_keyboard(on):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Turn off" if on else "Turn on",
+                                                      callback_data="autopics_toggle")]])
+
+
+def _toggle(bucket, item):
+    if item in bucket:
+        bucket.remove(item)
+    else:
+        bucket.append(item)
+    return bucket
 
 
 async def generate_avatar(state, *, nude=False):
@@ -162,7 +222,7 @@ async def generate_avatar(state, *, nude=False):
         outfits = DOMINANT_OUTFITS_MALE if gender == "male" else DOMINANT_OUTFITS_FEMALE
         return prompts.build(subject_clause(state), nude=False,
                              pose=random.choice(DOMINANT_POSES),
-                             scene=f"wearing {random.choice(outfits)}")
+                             outfit=random.choice(outfits))
 
     return await render.render_best(spec, build)
 
@@ -178,12 +238,71 @@ async def deliver_reward(bot, user_id, *, caption):
     await storage.deliver(bot, user_id, user_id, png, caption=caption, prefix="reward")
 
 
+async def autopics_cmd(update, context):
+    state = st.get_state(update.effective_user.id)
+    on = bool(state.get("avatar_enabled"))
+    await update.effective_message.reply_text(
+        f"Scheduled photos: {'on' if on else 'off'}"
+        f" (every {state.get('avatar_interval_minutes') or 60} min)",
+        reply_markup=autopics_keyboard(on))
+
+
+async def autopics_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    state = st.get_state(update.effective_user.id)
+    state["avatar_enabled"] = not bool(state.get("avatar_enabled"))
+    if state["avatar_enabled"]:
+        state["last_avatar_sent_at"] = None
+    await q.edit_message_text(
+        f"Scheduled photos: {'on' if state['avatar_enabled'] else 'off'}.",
+        reply_markup=autopics_keyboard(state["avatar_enabled"]))
+
+
 async def custom_input(update, context):
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or not msg.text:
         return
     state = st.get_state(user.id)
     pending = state.get("pending")
+    if pending == "custom_location":
+        state["venue"] = msg.text.strip()
+        state["rooms"] = []
+        state["features"] = {}
+        state["pending"] = "custom_rooms"
+        await msg.reply_text("Which rooms? Separate with commas.")
+        return
+    if pending == "custom_rooms":
+        supplied = [p.strip() for p in msg.text.split(",") if p.strip()]
+        if not supplied:
+            await msg.reply_text("Nothing usable. Try again.")
+            return
+        state["pending"] = None
+        if venue.rooms_for_venue(state.get("venue") or ""):
+            state["rooms"] = (state.get("rooms") or []) + supplied
+            await msg.reply_text("Added.", reply_markup=room_keyboard(state.get("venue") or "", state["rooms"]))
+        else:
+            state["rooms"] = supplied
+            await msg.reply_text("Now the features inside those rooms.",
+                                 reply_markup=present_feature_keyboard(state.get("venue") or "", supplied, []))
+        return
+    if pending == "custom_features":
+        state["pending"] = None
+        rooms = state.get("rooms") or []
+        feats = state.setdefault("features", {})
+        feats.setdefault(rooms[0] if rooms else "misc", []).append(msg.text.strip())
+        chosen = [f for g in feats.values() for f in g]
+        await msg.reply_text("Added.", reply_markup=present_feature_keyboard(
+            state.get("venue") or "", rooms, chosen))
+        return
+    if pending == "custom_probe":
+        pool = state.setdefault("probe_pool", [])
+        state["pending"] = None
+        if len(pool) < venue.MAX_PROBES:
+            pool.append(msg.text.strip())
+            state["probes"] = (state.get("probes") or []) + [msg.text.strip()]
+        await msg.reply_text("Added.", reply_markup=probe_keyboard(pool, state.get("probes") or []))
+        return
     if pending == "custom_outfit":
         state["current_outfit"] = "Custom: " + msg.text.strip()[:50]
         state["outfit_detail"] = msg.text.strip()[:300]
@@ -194,18 +313,7 @@ async def custom_input(update, context):
     if pending == "outfit_detail":
         state["outfit_detail"] = msg.text.strip()[:300]
         state["pending"] = None
-        await msg.reply_text("Noted. Use /wherenow.")
-        return
-    if pending == "custom_location":
-        state["location"] = msg.text.strip()[:100]
-        state["location_notes"] = None
-        state["pending"] = "present"
-        await msg.reply_text(f"{state['location']}\n\nWho is present?", reply_markup=present_keyboard())
-        return
-    if pending == "location_detail":
-        state["location_notes"] = msg.text.strip()[:400]
-        state["pending"] = None
-        await msg.reply_text("Good. Use /task.")
+        await msg.reply_text("Noted.")
         return
     if pending == "interval":
         parts = msg.text.strip().lower().split()
@@ -238,7 +346,12 @@ async def chat_handler(update, context):
     history.append({"role": "user", "content": msg.text.strip()})
     state["history"] = history[-20:]
 
-    has_task = bool(st.get_session().query(st.Task).filter_by(user_id=user.id, status="pending").first())
+    session = st.get_session()
+    try:
+        has_task = bool(session.query(st.Task).filter_by(user_id=user.id, status="pending").first())
+    finally:
+        session.close()
+
     title = get_title(state.get("avatar_gender"))
     low = msg.text.lower()
     context_info = (f"User: {user.username or 'unknown'} | gender {state.get('gender')} | "
@@ -259,10 +372,11 @@ async def chat_handler(update, context):
         ask = "Reply to them. Be playful, firm, 1-2 sentences. If lost, point at /task."
 
     await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
-    reply = await venice.chat([{"role": "user", "content": f"{context_info}\n\nThey said: \"{msg.text}\"\n\n{ask}"}],
-                              DOM_VOICE, temperature=0.9)
+    reply = await venice.chat(
+        [{"role": "user", "content": f"{context_info}\n\nThey said: \"{msg.text}\"\n\n{ask}"}],
+        DOM_VOICE, temperature=0.9)
     if not reply:
-        reply = f"Mmm? Something went wrong, pet. Try again."
+        reply = "Mmm? Something went wrong, pet. Try again."
     state["history"] = (state["history"] + [{"role": "assistant", "content": reply}])[-20:]
     await msg.reply_text(reply[:4000])
 
@@ -273,19 +387,20 @@ async def start_cmd(update, context):
     if not state.get("gender"):
         await update.effective_message.reply_text("Select gender:", reply_markup=gender_keyboard())
         return
-    loc = state.get("location") or "Not set"
     await update.effective_message.reply_text(
-        f"Welcome back.\n\nLocation: {loc}\nRisk: {state.get('risk_level') or 5} | "
-        f"Points: {state.get('points') or 0} | Streak: {state.get('streak') or 0}\n\n"
+        f"Welcome back.\n\nLocation: {state.get('location') or 'Not set'}\n"
+        f"Risk: {state.get('risk_level') or 5} | Points: {state.get('points') or 0} | "
+        f"Streak: {state.get('streak') or 0}\n\n"
         f"/task /wherenow /outfit /avatar /risk /kinks /interval /schedule /status /rewards")
 
 
 async def help_cmd(update, context):
     await update.effective_message.reply_text(
         "/task - get a challenge\n/wherenow - set location\n/outfit - set clothing\n"
-        "/avatar - create avatar\n/risk - set risk\n/kinks - preferences\n/interval - auto interval\n"
+        "/avatar - create avatar\n/reward - reward render\n/autopics - scheduled photos\n"
+        "/risk - set risk\n/kinks - preferences\n/interval - auto interval\n"
         "/schedule - auto tasks on/off\n/status - check task\n/rewards - progress\n"
-        "/skip - skip detail\n/test - diagnostics\n/resetowner - wipe")
+        "/clear - drop location\n/skip - skip detail\n/test - diagnostics\n/resetowner - wipe")
 
 
 async def test_cmd(update, context):
@@ -293,13 +408,13 @@ async def test_cmd(update, context):
     await update.effective_message.reply_text(
         f"pending: {state.get('pending')}\nlocation: {state.get('location') or 'unset'}\n"
         f"detail: {state.get('location_notes') or 'none'}\noutfit: {state.get('outfit_detail') or 'none'}\n"
+        f"autopics: {state.get('avatar_enabled')}\n"
         f"model: {venice.IMAGE_MODEL} -> {venice.IMAGE_FALLBACKS}\n"
         f"upscale: {os.getenv('IMAGE_UPSCALE', '2')} sharpen: {os.getenv('IMAGE_SHARPEN', '1')}")
 
 
 async def skip_cmd(update, context):
-    state = st.get_state(update.effective_user.id)
-    state["pending"] = None
+    st.get_state(update.effective_user.id)["pending"] = None
     await update.effective_message.reply_text("Fine. Use /task.")
 
 
@@ -337,30 +452,133 @@ async def outfit_callback(update, context):
 
 
 async def wherenow_cmd(update, context):
-    await update.effective_message.reply_text(
-        "Where are you?", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Store", callback_data="ctx_store")],
-            [InlineKeyboardButton("Home", callback_data="ctx_home")],
-            [InlineKeyboardButton("Hotel", callback_data="ctx_hotel")],
-            [InlineKeyboardButton("Vehicle", callback_data="ctx_car")],
-            [InlineKeyboardButton("Work", callback_data="ctx_work")],
-            [InlineKeyboardButton("Custom", callback_data="ctx_custom")]]))
+    state = st.get_state(update.effective_user.id)
+    state["venue"] = None
+    state["rooms"] = []
+    state["features"] = {}
+    state["probes"] = []
+    state["pending"] = None
+    await update.effective_message.reply_text("Where are you?", reply_markup=venue_keyboard())
 
 
-async def context_callback(update, context):
+async def venue_callback(update, context):
     q = update.callback_query
     await q.answer()
-    kind = q.data.split("_", 1)[1]
     state = st.get_state(update.effective_user.id)
-    if kind == "custom":
+    if q.data == "venue_custom":
         state["pending"] = "custom_location"
         await q.edit_message_text("Describe exactly where you are.")
         return
-    state["location"] = {"store": "Retail Store", "home": "Home", "hotel": "Hotel",
-                         "car": "Vehicle", "work": "Work"}.get(kind, "Unknown")
-    state["location_notes"] = None
-    state["pending"] = "present"
-    await q.edit_message_text(f"{state['location']}\n\nWho is present?", reply_markup=present_keyboard())
+    v = q.data.split("_", 1)[1]
+    state["venue"] = v
+    state["rooms"] = []
+    state["features"] = {}
+    if venue.rooms_for_venue(v):
+        await q.edit_message_text("Which rooms?", reply_markup=room_keyboard(v, []))
+    else:
+        state["pending"] = "custom_rooms"
+        await q.edit_message_text("List the rooms, comma separated.")
+
+
+async def room_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    state = st.get_state(update.effective_user.id)
+    v = state.get("venue") or ""
+    if q.data == "room_done":
+        if not state.get("rooms"):
+            await q.edit_message_text("Pick at least one room.")
+            return
+        await q.edit_message_text("Now the features.",
+                                  reply_markup=present_feature_keyboard(v, state["rooms"], []))
+        return
+    if q.data == "room_custom":
+        state["pending"] = "custom_rooms"
+        await q.edit_message_text("Add a room name.")
+        return
+    rooms = venue.rooms_for_venue(v)
+    i = int(q.data.split("_", 1)[1])
+    if 0 <= i < len(rooms):
+        _toggle(state.setdefault("rooms", []), rooms[i])
+    await q.edit_message_reply_markup(reply_markup=room_keyboard(v, state["rooms"]))
+
+
+async def present_feature_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    state = st.get_state(update.effective_user.id)
+    v = state.get("venue") or ""
+    rooms = state.get("rooms") or []
+    feats = state.setdefault("features", {})
+    if q.data == "pf_done":
+        await show_probes(q, update.effective_user.id, v, rooms,
+                          [f for g in feats.values() for f in g])
+        return
+    if q.data == "pf_custom":
+        state["pending"] = "custom_features"
+        await q.edit_message_text("Describe the feature.")
+        return
+    _, ri, fi = q.data.split("_")
+    ri, fi = int(ri), int(fi)
+    if 0 <= ri < len(rooms):
+        opts = venue.present_features(v, rooms[ri])
+        if 0 <= fi < len(opts):
+            _toggle(feats.setdefault(rooms[ri], []), opts[fi])
+    await q.edit_message_reply_markup(reply_markup=present_feature_keyboard(
+        v, rooms, [f for g in feats.values() for f in g]))
+
+
+async def show_probes(q, user_id, v, rooms, chosen):
+    state = st.get_state(user_id)
+    baseline = venue.probe_options(v, rooms)
+    known = [*rooms, *chosen, *baseline]
+    await q.edit_message_text("Working out the details...")
+    try:
+        ai = await venice.generate_probes(v, rooms, known)
+    except Exception:
+        ai = []
+    pool = (baseline + ai)[:venue.MAX_PROBES]
+    state["probe_pool"] = pool
+    state["probes"] = []
+    await q.edit_message_text("Anything else worth pinning down?",
+                              reply_markup=probe_keyboard(pool, []))
+
+
+async def probe_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    state = st.get_state(update.effective_user.id)
+    pool = state.get("probe_pool") or []
+    if q.data == "probe_done":
+        await commit_location(q, update.effective_user.id)
+        return
+    if q.data == "probe_custom":
+        state["pending"] = "custom_probe"
+        await q.edit_message_text("Describe it.")
+        return
+    i = int(q.data.split("_", 1)[1])
+    if 0 <= i < len(pool):
+        _toggle(state.setdefault("probes", []), pool[i])
+    await q.edit_message_reply_markup(reply_markup=probe_keyboard(pool, state["probes"]))
+
+
+async def commit_location(q, user_id):
+    state = st.get_state(user_id)
+    v = state.get("venue") or ""
+    rooms = state.get("rooms") or []
+    feats = state.get("features") or {}
+    probes = state.get("probes") or []
+    lines = [f"Venue: {v}"]
+    for room in rooms:
+        picked = feats.get(room, [])
+        lines.append(f"{room}: " + (", ".join(picked) if picked else "as is"))
+    if probes:
+        lines.append("Also: " + ", ".join(probes))
+    notes = "\n".join(lines)
+    state["location"] = v
+    state["location_notes"] = notes
+    state["pending"] = None
+    await q.edit_message_text(f"{notes}\n\nWho is present?", reply_markup=present_keyboard())
 
 
 async def present_callback(update, context):
@@ -378,8 +596,7 @@ async def present_callback(update, context):
     elif state.get("risk_pre_kids"):
         state["risk_level"] = state["risk_pre_kids"]
         state["risk_pre_kids"] = None
-    state["pending"] = "privacy"
-    await q.edit_message_text("Privacy level?", reply_markup=privacy_keyboard())
+    await q.edit_message_text("Privacy level?", reply_markup=privacy_keyboard(state.get("privacy")))
 
 
 async def privacy_callback(update, context):
@@ -387,10 +604,21 @@ async def privacy_callback(update, context):
     await q.answer()
     state = st.get_state(update.effective_user.id)
     state["privacy"] = q.data.split("_", 1)[1]
-    state["pending"] = "location_detail"
     await q.edit_message_text(
-        f"Anything about {state.get('location') or 'this place'} I should know? "
-        f"What's in reach, how busy. Type it, or /skip.")
+        f"Locked in.\n\n{state.get('location_notes') or ''}\n\nUse /task.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Clear", callback_data="loc_clear")]]))
+
+
+async def clear_location(update, context):
+    state = st.get_state(update.effective_user.id)
+    for k in ("location", "location_notes", "rooms", "probes", "venue", "features"):
+        state[k] = None if k in ("location", "location_notes", "venue") else []
+    state["pending"] = None
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Location cleared.")
+    else:
+        await update.effective_message.reply_text("Location cleared.")
 
 
 async def risk_cmd(update, context):
@@ -450,8 +678,7 @@ async def interval_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     state["pending"] = "interval"
     await update.effective_message.reply_text(
-        f"Current: {state.get('min_interval')}-{state.get('max_interval')} minutes.\n"
-        f"Send as: MIN MAX")
+        f"Current: {state.get('min_interval')}-{state.get('max_interval')} minutes.\nSend as: MIN MAX")
 
 
 async def schedule_cmd(update, context):
@@ -511,7 +738,8 @@ async def issue_task(update, context, label="TASK"):
         context.job_queue.run_once(expire_task, when=timedelta(minutes=30),
                                    data={"user_id": user.id, "task_id": task.id})
         await update.effective_message.reply_text(
-            f"{label}\n\n{text}\n\n30 minutes.", reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
+            f"{label}\n\n{text}\n\n30 minutes.",
+            reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
     finally:
         session.close()
 
@@ -542,7 +770,7 @@ async def rewards_cmd(update, context):
     need = tk.reward_threshold(state.get("streak") or 0)
     await update.effective_message.reply_text(
         f"Rewards unlock every {need} completions.\n\nStreak: {state.get('streak') or 0}\n"
-        f"Progress: {state.get('challenges_since_reward') or 0}/{need}")
+        f"Progress: {state.get('challenges_since_reward') or 0}/{need}\n\n/reward to trigger one now.")
 
 
 async def complete_callback(update, context):
@@ -757,7 +985,8 @@ async def expire_task(context):
 
 
 async def avatar_cmd(update, context):
-    st.get_state(update.effective_user.id)["pending"] = "avatar_gender"
+    state = st.get_state(update.effective_user.id)
+    state["pending"] = "avatar_gender"
     await update.effective_message.reply_text(
         "Create avatar 1/5: gender",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(v[0], callback_data=f"av_gender_{k}")]
@@ -850,6 +1079,15 @@ async def debugavatar_cmd(update, context):
     await render.debug_send(context.bot, png, label="avatar", chat_id=user.id, upscale_pass=True)
 
 
+async def reward_cmd(update, context):
+    user = update.effective_user
+    await update.effective_message.reply_text("One sec...")
+    try:
+        await deliver_reward(context.bot, user.id, caption=f"Yours, {get_title(st.get_state(user.id).get('avatar_gender'))}.")
+    except Exception as exc:
+        await update.effective_message.reply_text(f"Failed: {exc}")
+
+
 async def resetowner_cmd(update, context):
     await update.effective_message.reply_text(
         "Delete all data?", reply_markup=InlineKeyboardMarkup([
@@ -887,6 +1125,9 @@ async def scheduled_check(context):
             if session.query(st.Task).filter_by(user_id=row.user_id, status="pending").first():
                 continue
             state = st.get_state(row.user_id)
+            if not state.get("gender") or not state.get("location"):
+                state["next_task_time"] = now + timedelta(minutes=15)
+                continue
             text, risk = await tk.generate_task_text(state, session, voice=DOM_VOICE)
             task = st.Task(user_id=row.user_id, task_text=text, risk_level=risk, created_at=now,
                            expires_at=now + timedelta(minutes=30))
@@ -900,8 +1141,9 @@ async def scheduled_check(context):
                 chat_id=row.user_id, text=f"AUTO TASK\n\n{text}\n\n30 minutes.",
                 reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
             await asyncio.sleep(1)
-        for row in session.query(st.UserState).filter(st.UserState.avatar_enabled == True,
-                                                      st.UserState.avatar_gender.isnot(None)).all():
+        for row in session.query(st.UserState).filter(st.UserState.avatar_enabled == True).all():
+            if not row.avatar_gender:
+                continue
             last = row.last_avatar_sent_at
             if last and last + timedelta(minutes=row.avatar_interval_minutes or 60) > now:
                 continue
@@ -941,6 +1183,7 @@ def main():
     app.add_handler(CommandHandler("gender", gender_cmd))
     app.add_handler(CommandHandler("outfit", outfit_cmd))
     app.add_handler(CommandHandler("wherenow", wherenow_cmd))
+    app.add_handler(CommandHandler("clear", clear_location))
     app.add_handler(CommandHandler("risk", risk_cmd))
     app.add_handler(CommandHandler("kinks", kinks_cmd))
     app.add_handler(CommandHandler("task", task_cmd))
@@ -948,13 +1191,19 @@ def main():
     app.add_handler(CommandHandler("schedule", schedule_cmd))
     app.add_handler(CommandHandler("interval", interval_cmd))
     app.add_handler(CommandHandler("avatar", avatar_cmd))
+    app.add_handler(CommandHandler("reward", reward_cmd))
+    app.add_handler(CommandHandler("autopics", autopics_cmd))
     app.add_handler(CommandHandler("debugavatar", debugavatar_cmd))
     app.add_handler(CommandHandler("resetowner", resetowner_cmd))
     app.add_handler(CommandHandler("rewards", rewards_cmd))
 
     app.add_handler(CallbackQueryHandler(gender_callback, pattern="^gender_"))
     app.add_handler(CallbackQueryHandler(outfit_callback, pattern="^outfit_"))
-    app.add_handler(CallbackQueryHandler(context_callback, pattern="^ctx_"))
+    app.add_handler(CallbackQueryHandler(venue_callback, pattern="^venue_"))
+    app.add_handler(CallbackQueryHandler(room_callback, pattern="^room_"))
+    app.add_handler(CallbackQueryHandler(present_feature_callback, pattern="^pf_"))
+    app.add_handler(CallbackQueryHandler(probe_callback, pattern="^probe_"))
+    app.add_handler(CallbackQueryHandler(clear_location, pattern="^loc_clear$"))
     app.add_handler(CallbackQueryHandler(present_callback, pattern="^present_"))
     app.add_handler(CallbackQueryHandler(privacy_callback, pattern="^privacy_"))
     app.add_handler(CallbackQueryHandler(risk_callback, pattern="^risk_"))
@@ -968,6 +1217,7 @@ def main():
     app.add_handler(CallbackQueryHandler(retry_callback, pattern="^retry_"))
     app.add_handler(CallbackQueryHandler(mercy_callback, pattern="^mercy_"))
     app.add_handler(CallbackQueryHandler(schedule_callback, pattern="^sched_"))
+    app.add_handler(CallbackQueryHandler(autopics_callback, pattern="^autopics_toggle$"))
     app.add_handler(CallbackQueryHandler(reset_callback, pattern="^reset_"))
     app.add_handler(CallbackQueryHandler(avatar_gender_callback, pattern="^av_gender_"))
     app.add_handler(CallbackQueryHandler(avatar_race_callback, pattern="^av_race_"))
