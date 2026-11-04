@@ -756,8 +756,9 @@ async def status_cmd(update, context):
         active = session.query(st.Task).filter_by(user_id=user.id, status="pending").first()
         if active:
             left = (active.expires_at - datetime.now(timezone.utc)).total_seconds() / 60
+            extra = f"\n\nNeeds: {active.followup_target}" if active.followup_target else ""
             await update.effective_message.reply_text(
-                f"{max(0, left):.0f} min left\n\n{active.task_text[:200]}",
+                f"{max(0, left):.0f} min left\n\n{active.task_text[:200]}{extra}",
                 reply_markup=task_keyboard(active.id, get_title(st.get_state(user.id).get("avatar_gender"))))
         else:
             await update.effective_message.reply_text("No active task. Use /task.")
@@ -867,6 +868,7 @@ async def giveup_callback(update, context):
         task = session.query(st.Task).filter_by(id=int(q.data.split("_", 1)[1]), user_id=user.id).first()
         if task and task.status == "pending":
             task.status = "failed"
+            task.followup_target = None
             state["points"] = max(0, (state.get("points") or 0) - 5)
             state["streak"] = 0
             session.commit()
@@ -943,20 +945,28 @@ async def handle_photo(update, context):
 
         if task.verification_attempts >= 3:
             task.status = "failed"
+            task.followup_target = None
             state["consecutive_failures"] = (state.get("consecutive_failures") or 0) + 1
             session.commit()
             await update.message.reply_text(f"Failed. {reason}")
             return
-        task.followup_target = missing
-        session.commit()
+
         left = 3 - task.verification_attempts
-        body = (f"Not quite. I couldn't see {missing}. Show me {missing} - just that."
-                if missing else f"Not quite. {reason} Once more.")
-        await update.message.reply_text(
-            f"{body}\n\n{left} {'try' if left == 1 else 'tries'} left.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("Try Again", callback_data=f"retry_{task.id}"),
-                InlineKeyboardButton("Give Up", callback_data=f"giveup_{task.id}")]]))
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Try Again", callback_data=f"retry_{task.id}"),
+            InlineKeyboardButton("Give Up", callback_data=f"giveup_{task.id}")]])
+        if missing:
+            task.followup_target = missing
+            session.commit()
+            await update.message.reply_text(
+                f"Not quite. Send one photo of just {missing} - close in, nothing else in frame.\n\n"
+                f"{left} {'try' if left == 1 else 'tries'} left.", reply_markup=keyboard)
+        else:
+            task.followup_target = None
+            session.commit()
+            await update.message.reply_text(
+                f"Not quite - {reason}\n\nReshoot it so the task is obvious.\n\n"
+                f"{left} {'try' if left == 1 else 'tries'} left.", reply_markup=keyboard)
     except Exception:
         logger.exception("photo failed")
         await update.message.reply_text("Error processing that photo.")
@@ -1083,7 +1093,8 @@ async def reward_cmd(update, context):
     user = update.effective_user
     await update.effective_message.reply_text("One sec...")
     try:
-        await deliver_reward(context.bot, user.id, caption=f"Yours, {get_title(st.get_state(user.id).get('avatar_gender'))}.")
+        await deliver_reward(context.bot, user.id,
+                             caption=f"Yours, {get_title(st.get_state(user.id).get('avatar_gender'))}.")
     except Exception as exc:
         await update.effective_message.reply_text(f"Failed: {exc}")
 
