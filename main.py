@@ -73,6 +73,9 @@ GENITAL_CLAUSE = {"male": "cock and balls clearly visible",
                   "female": "pussy clearly visible, breasts bare",
                   "trans": "cock and breasts clearly visible"}
 
+PRIVACY_LABELS = {"private": "Private", "semi": "Semi-private",
+                  "exposed": "Exposed", "public": "Public"}
+
 GREETINGS = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening", "hiya", "howdy"]
 TASK_INQUIRIES = ["task", "my task", "current task", "what task", "do i have a task", "any task",
                   "status", "check task", "pending task"]
@@ -127,9 +130,9 @@ def present_keyboard():
 
 
 def privacy_keyboard(selected=None):
-    levels = ["private", "semi", "exposed", "public"]
-    return InlineKeyboardMarkup([[InlineKeyboardButton(("Y " if lv == selected else "") + lv,
-                                                      callback_data=f"privacy_{lv}")] for lv in levels])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(("Y " if lv == selected else "") + PRIVACY_LABELS[lv],
+                                                      callback_data=f"privacy_{lv}")]
+                                 for lv in ("private", "semi", "exposed", "public")])
 
 
 def kinks_keyboard(state):
@@ -156,10 +159,18 @@ def venue_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-def room_keyboard(venue_name, selected):
+def room_keyboard(venue_name, selected, extra=None):
+    known = venue.rooms_for_venue(venue_name)
     rows = [[InlineKeyboardButton(("Y " if r in selected else "") + r.title(),
                                   callback_data=f"room_{i}")]
-            for i, r in enumerate(venue.rooms_for_venue(venue_name))]
+            for i, r in enumerate(known)]
+    seen = {r.lower() for r in known}
+    for index, label in enumerate(extra or []):
+        if label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        rows.append([InlineKeyboardButton(("Y " if label in selected else "") + label[:20],
+                                          callback_data=f"xroom_{index}")])
     rows.append([InlineKeyboardButton("Add a room", callback_data="room_custom"),
                  InlineKeyboardButton("That's the lot", callback_data="room_done")])
     return InlineKeyboardMarkup(rows)
@@ -266,11 +277,23 @@ async def custom_input(update, context):
     state = st.get_state(user.id)
     pending = state.get("pending")
     if pending == "custom_location":
-        state["venue"] = msg.text.strip()
+        place = msg.text.strip()[:60]
+        state["venue"] = place
         state["rooms"] = []
         state["features"] = {}
-        state["pending"] = "custom_rooms"
-        await msg.reply_text("Which rooms? Separate with commas.")
+        state["venue_typical"] = None
+        state["pending"] = None
+        notice = await msg.reply_text("Working out the layout...")
+        try:
+            suggestions = await venice.generate_rooms(place)
+            typical = await venice.generate_venue_typical(place)
+        except Exception:
+            logger.warning("layout lookup failed")
+            suggestions, typical = [], []
+        state["room_pool"] = suggestions
+        state["venue_typical"] = ", ".join(typical)
+        await notice.edit_text(f"{place.title()}. Which parts are in play?",
+                               reply_markup=room_keyboard(place, [], suggestions))
         return
     if pending == "custom_rooms":
         supplied = [p.strip() for p in msg.text.split(",") if p.strip()]
@@ -282,9 +305,9 @@ async def custom_input(update, context):
             state["rooms"] = (state.get("rooms") or []) + supplied
             await msg.reply_text("Added.", reply_markup=room_keyboard(state.get("venue") or "", state["rooms"]))
         else:
-            state["rooms"] = supplied
+            state["rooms"] = (state.get("rooms") or []) + supplied
             await msg.reply_text("Now the features inside those rooms.",
-                                 reply_markup=present_feature_keyboard(state.get("venue") or "", supplied, []))
+                                 reply_markup=present_feature_keyboard(state.get("venue") or "", state["rooms"], []))
         return
     if pending == "custom_features":
         state["pending"] = None
@@ -389,8 +412,8 @@ async def start_cmd(update, context):
         return
     await update.effective_message.reply_text(
         f"Welcome back.\n\nLocation: {state.get('location') or 'Not set'}\n"
-        f"Risk: {state.get('risk_level') or 5} | Points: {state.get('points') or 0} | "
-        f"Streak: {state.get('streak') or 0}\n\n"
+        f"Risk: {state.get('risk_level') or 5} | Privacy: {PRIVACY_LABELS.get(state.get('privacy') or 'private')}\n"
+        f"Points: {state.get('points') or 0} | Streak: {state.get('streak') or 0}\n\n"
         f"/task /wherenow /outfit /avatar /risk /kinks /interval /schedule /status /rewards")
 
 
@@ -408,6 +431,7 @@ async def test_cmd(update, context):
     await update.effective_message.reply_text(
         f"pending: {state.get('pending')}\nlocation: {state.get('location') or 'unset'}\n"
         f"detail: {state.get('location_notes') or 'none'}\noutfit: {state.get('outfit_detail') or 'none'}\n"
+        f"privacy: {state.get('privacy')}\n"
         f"autopics: {state.get('avatar_enabled')}\n"
         f"model: {venice.IMAGE_MODEL} -> {venice.IMAGE_FALLBACKS}\n"
         f"upscale: {os.getenv('IMAGE_UPSCALE', '2')} sharpen: {os.getenv('IMAGE_SHARPEN', '1')}")
@@ -454,6 +478,7 @@ async def outfit_callback(update, context):
 async def wherenow_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     state["venue"] = None
+    state["venue_typical"] = None
     state["rooms"] = []
     state["features"] = {}
     state["probes"] = []
@@ -471,6 +496,7 @@ async def venue_callback(update, context):
         return
     v = q.data.split("_", 1)[1]
     state["venue"] = v
+    state["venue_typical"] = None
     state["rooms"] = []
     state["features"] = {}
     if venue.rooms_for_venue(v):
@@ -495,6 +521,13 @@ async def room_callback(update, context):
     if q.data == "room_custom":
         state["pending"] = "custom_rooms"
         await q.edit_message_text("Add a room name.")
+        return
+    if q.data.startswith("xroom_"):
+        i = int(q.data.split("_", 1)[1])
+        pool = state.get("room_pool") or []
+        if 0 <= i < len(pool):
+            _toggle(state.setdefault("rooms", []), pool[i])
+        await q.edit_message_reply_markup(reply_markup=room_keyboard(v, state["rooms"], pool))
         return
     rooms = venue.rooms_for_venue(v)
     i = int(q.data.split("_", 1)[1])
@@ -540,7 +573,7 @@ async def show_probes(q, user_id, v, rooms, chosen):
     pool = (baseline + ai)[:venue.MAX_PROBES]
     state["probe_pool"] = pool
     state["probes"] = []
-    await q.edit_message_text("Anything else worth pinning down?",
+    await q.edit_message_text(venue.probe_question(rooms),
                               reply_markup=probe_keyboard(pool, []))
 
 
@@ -596,23 +629,29 @@ async def present_callback(update, context):
     elif state.get("risk_pre_kids"):
         state["risk_level"] = state["risk_pre_kids"]
         state["risk_pre_kids"] = None
-    await q.edit_message_text("Privacy level?", reply_markup=privacy_keyboard(state.get("privacy")))
+    await q.edit_message_text(
+        f"Privacy (currently {PRIVACY_LABELS.get(state.get('privacy') or 'private')})?",
+        reply_markup=privacy_keyboard(state.get("privacy")))
 
 
 async def privacy_callback(update, context):
     q = update.callback_query
     await q.answer()
     state = st.get_state(update.effective_user.id)
-    state["privacy"] = q.data.split("_", 1)[1]
+    level = q.data.split("_", 1)[1]
+    if level not in PRIVACY_LABELS:
+        await q.edit_message_text("Unknown level.")
+        return
+    state["privacy"] = level
     await q.edit_message_text(
-        f"Locked in.\n\n{state.get('location_notes') or ''}\n\nUse /task.",
+        f"Locked in - {PRIVACY_LABELS[level]}.\n\n{state.get('location_notes') or ''}\n\nUse /task.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Clear", callback_data="loc_clear")]]))
 
 
 async def clear_location(update, context):
     state = st.get_state(update.effective_user.id)
-    for k in ("location", "location_notes", "rooms", "probes", "venue", "features"):
-        state[k] = None if k in ("location", "location_notes", "venue") else []
+    for k in ("location", "location_notes", "rooms", "probes", "venue", "features", "venue_typical", "room_pool"):
+        state[k] = None if k in ("location", "location_notes", "venue", "venue_typical") else []
     state["pending"] = None
     if update.callback_query:
         await update.callback_query.answer()
@@ -702,6 +741,14 @@ async def schedule_callback(update, context):
         await q.edit_message_text("Auto tasks off.")
 
 
+def _exposure_note(delta, label, baseline, risk, max_risk):
+    if not delta:
+        return ""
+    over = " - past your usual ceiling" if risk > max_risk else ""
+    return (f"Exposure: {label} - you set {baseline}, this one steps out\n"
+            f"Risk {risk}/5{over}\n\n")
+
+
 async def issue_task(update, context, label="TASK"):
     user = update.effective_user
     state = st.get_state(user.id)
@@ -729,16 +776,19 @@ async def issue_task(update, context, label="TASK"):
                                       caption="Your task awaits...", prefix="avatar")
             except Exception:
                 logger.warning("pre-task avatar failed")
-        text, risk = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
         now = datetime.now(timezone.utc)
         task = st.Task(user_id=user.id, task_text=text, risk_level=risk, created_at=now,
+                       exposure=delta, exposure_label=exposure,
                        expires_at=now + timedelta(minutes=30))
         session.add(task)
         session.commit()
         context.job_queue.run_once(expire_task, when=timedelta(minutes=30),
                                    data={"user_id": user.id, "task_id": task.id})
+        note = _exposure_note(delta, exposure, state.get("privacy") or "private", risk,
+                              state.get("risk_level") or 5)
         await update.effective_message.reply_text(
-            f"{label}\n\n{text}\n\n30 minutes.",
+            f"{label}\n\n{note}{text}\n\n30 minutes.",
             reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
     finally:
         session.close()
@@ -757,8 +807,9 @@ async def status_cmd(update, context):
         if active:
             left = (active.expires_at - datetime.now(timezone.utc)).total_seconds() / 60
             extra = f"\n\nNeeds: {active.followup_target}" if active.followup_target else ""
+            exposure = (f"\nExposure: {active.exposure_label}" if active.exposure else "")
             await update.effective_message.reply_text(
-                f"{max(0, left):.0f} min left\n\n{active.task_text[:200]}{extra}",
+                f"{max(0, left):.0f} min left{exposure}\n\n{active.task_text[:200]}{extra}",
                 reply_markup=task_keyboard(active.id, get_title(st.get_state(user.id).get("avatar_gender"))))
         else:
             await update.effective_message.reply_text("No active task. Use /task.")
@@ -819,14 +870,17 @@ async def blocker_input(update, context):
                                               expires_at=now + timedelta(hours=3)))
         session.commit()
         await update.effective_message.reply_text("Reworking it.")
-        new, risk = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
         task.task_text, task.risk_level = new, risk
+        task.exposure, task.exposure_label = delta, exposure
         task.verification_attempts, task.followup_target = 0, None
         task.expires_at = now + timedelta(minutes=30)
         task.blocked_count += 1
         session.commit()
+        note = _exposure_note(delta, exposure, state.get("privacy") or "private", risk,
+                              state.get("risk_level") or 5)
         await update.effective_message.reply_text(
-            f"REWORKED\n\n{new}\n\n30 minutes.",
+            f"REWORKED\n\n{note}{new}\n\n30 minutes.",
             reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
     finally:
         session.close()
@@ -845,14 +899,17 @@ async def mercy_callback(update, context):
             await q.edit_message_text("No active task.")
             return
         await q.edit_message_text("Mercy granted. Finding something else...")
-        new, risk = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
         now = datetime.now(timezone.utc)
         task.task_text, task.risk_level = new, risk
+        task.exposure, task.exposure_label = delta, exposure
         task.verification_attempts, task.followup_target = 0, None
         task.expires_at = now + timedelta(minutes=30)
         session.commit()
+        note = _exposure_note(delta, exposure, state.get("privacy") or "private", risk,
+                              state.get("risk_level") or 5)
         await context.bot.send_message(
-            chat_id=user.id, text=f"NEW TASK\n\n{new}\n\n30 minutes.",
+            chat_id=user.id, text=f"NEW TASK\n\n{note}{new}\n\n30 minutes.",
             reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
     finally:
         session.close()
@@ -929,7 +986,7 @@ async def handle_photo(update, context):
             state["challenges_since_reward"] = (state.get("challenges_since_reward") or 0) + 1
             session.commit()
             gain = 10 * task.risk_level
-            need = tk.reward_threshold(state["streak"])
+            need = tk.reward_threshold(state["streak"], task.exposure or 0)
             if state["challenges_since_reward"] >= need:
                 state["challenges_since_reward"] = 0
                 await update.message.reply_text(f"+{gain} points. Streak {state['streak']}.\n\nReward earned.")
@@ -1139,8 +1196,9 @@ async def scheduled_check(context):
             if not state.get("gender") or not state.get("location"):
                 state["next_task_time"] = now + timedelta(minutes=15)
                 continue
-            text, risk = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+            text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
             task = st.Task(user_id=row.user_id, task_text=text, risk_level=risk, created_at=now,
+                           exposure=delta, exposure_label=exposure,
                            expires_at=now + timedelta(minutes=30))
             session.add(task)
             state["next_task_time"] = now + timedelta(
@@ -1148,8 +1206,9 @@ async def scheduled_check(context):
             session.commit()
             context.job_queue.run_once(expire_task, when=timedelta(minutes=30),
                                        data={"user_id": row.user_id, "task_id": task.id})
+            note = f"Exposure: {exposure}\n" if delta else ""
             await context.bot.send_message(
-                chat_id=row.user_id, text=f"AUTO TASK\n\n{text}\n\n30 minutes.",
+                chat_id=row.user_id, text=f"AUTO TASK\n\n{note}{text}\n\n30 minutes.",
                 reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
             await asyncio.sleep(1)
         for row in session.query(st.UserState).filter(st.UserState.avatar_enabled == True).all():
@@ -1211,7 +1270,7 @@ def main():
     app.add_handler(CallbackQueryHandler(gender_callback, pattern="^gender_"))
     app.add_handler(CallbackQueryHandler(outfit_callback, pattern="^outfit_"))
     app.add_handler(CallbackQueryHandler(venue_callback, pattern="^venue_"))
-    app.add_handler(CallbackQueryHandler(room_callback, pattern="^room_"))
+    app.add_handler(CallbackQueryHandler(room_callback, pattern="^room_|^xroom_"))
     app.add_handler(CallbackQueryHandler(present_feature_callback, pattern="^pf_"))
     app.add_handler(CallbackQueryHandler(probe_callback, pattern="^probe_"))
     app.add_handler(CallbackQueryHandler(clear_location, pattern="^loc_clear$"))
