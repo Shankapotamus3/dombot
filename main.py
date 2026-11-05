@@ -173,54 +173,6 @@ def venue_keyboard():
     return InlineKeyboardMarkup(rows)
 
 
-def room_keyboard(venue_name, selected, extra=None):
-    known = venue.rooms_for_venue(venue_name)
-    rows = [[InlineKeyboardButton(("Y " if r in selected else "") + r.title(),
-                                  callback_data=f"room_{i}")]
-            for i, r in enumerate(known)]
-    seen = {r.lower() for r in known}
-    for index, label in enumerate(extra or []):
-        if label.lower() in seen:
-            continue
-        seen.add(label.lower())
-        rows.append([InlineKeyboardButton(("Y " if label in selected else "") + label[:20],
-                                          callback_data=f"xroom_{index}")])
-    rows.append([InlineKeyboardButton("Add a room", callback_data="room_custom"),
-                 InlineKeyboardButton("That's the lot", callback_data="room_done")])
-    return InlineKeyboardMarkup(rows)
-
-
-def present_feature_keyboard(venue_name, rooms, selected):
-    rows, row = [], []
-    for ri, room in enumerate(rooms):
-        for fi, feature in enumerate(venue.present_features(venue_name, room)):
-            row.append(InlineKeyboardButton(("Y " if feature in selected else "") + feature[:18],
-                                            callback_data=f"pf_{ri}_{fi}"))
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("Add my own", callback_data="pf_custom"),
-                 InlineKeyboardButton("Done", callback_data="pf_done")])
-    return InlineKeyboardMarkup(rows)
-
-
-def probe_keyboard(pool, selected):
-    rows, row = [], []
-    for i, item in enumerate(pool):
-        row.append(InlineKeyboardButton(("Y " if item in selected else "") + item[:18],
-                                        callback_data=f"probe_{i}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("Add my own", callback_data="probe_custom"),
-                 InlineKeyboardButton("Done", callback_data="probe_done")])
-    return InlineKeyboardMarkup(rows)
-
-
 def _toggle(bucket, item):
     if item in bucket:
         bucket.remove(item)
@@ -275,43 +227,9 @@ async def custom_input(update, context):
     if pending == "custom_location":
         place = msg.text.strip()[:60]
         state["venue"] = place
-        state["rooms"] = []
-        state["features"] = {}
-        state["venue_typical"] = None
-        state["room_pool"] = []
         state["pending"] = "wizard_privacy"
         text, markup = _privacy_prompt(state)
         await msg.reply_text(text, reply_markup=markup)
-        return
-    if pending == "custom_rooms":
-        supplied = [p.strip() for p in msg.text.split(",") if p.strip()]
-        if not supplied:
-            await msg.reply_text("Nothing usable. Try again.")
-            return
-        state["pending"] = None
-        state["rooms"] = (state.get("rooms") or []) + supplied
-        if venue.rooms_for_venue(state.get("venue") or ""):
-            await msg.reply_text("Added.", reply_markup=room_keyboard(state.get("venue") or "", state["rooms"]))
-        else:
-            await msg.reply_text("Now the features inside those rooms.",
-                                 reply_markup=present_feature_keyboard(state.get("venue") or "", state["rooms"], []))
-        return
-    if pending == "custom_features":
-        state["pending"] = None
-        rooms = state.get("rooms") or []
-        feats = state.setdefault("features", {})
-        feats.setdefault(rooms[0] if rooms else "misc", []).append(msg.text.strip())
-        chosen = [f for g in feats.values() for f in g]
-        await msg.reply_text("Added.", reply_markup=present_feature_keyboard(
-            state.get("venue") or "", rooms, chosen))
-        return
-    if pending == "custom_probe":
-        pool = state.setdefault("probe_pool", [])
-        state["pending"] = None
-        if len(pool) < venue.MAX_PROBES:
-            pool.append(msg.text.strip())
-            state["probes"] = (state.get("probes") or []) + [msg.text.strip()]
-        await msg.reply_text("Added.", reply_markup=probe_keyboard(pool, state.get("probes") or []))
         return
     if pending == "custom_outfit":
         state["current_outfit"] = "Custom: " + msg.text.strip()[:50]
@@ -419,7 +337,7 @@ async def test_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     await update.effective_message.reply_text(
         f"pending: {state.get('pending')}\nlocation: {state.get('location') or 'unset'}\n"
-        f"detail: {state.get('location_notes') or 'none'}\noutfit: {state.get('outfit_detail') or 'none'}\n"
+        f"outfit: {state.get('outfit_detail') or 'none'}\n"
         f"privacy: {state.get('privacy')}\nintensity: {state.get('intensity') or 'standard'}\n"
         f"task pic chance: {TASK_PIC_CHANCE}\n"
         f"model: {venice.IMAGE_MODEL} -> {venice.IMAGE_FALLBACKS}\n"
@@ -468,9 +386,6 @@ async def wherenow_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     state["venue"] = None
     state["venue_typical"] = None
-    state["rooms"] = []
-    state["features"] = {}
-    state["probes"] = []
     state["pending"] = None
     await update.effective_message.reply_text("Where are you?", reply_markup=venue_keyboard())
 
@@ -483,122 +398,10 @@ async def venue_callback(update, context):
         state["pending"] = "custom_location"
         await q.edit_message_text("Describe exactly where you are.")
         return
-    v = q.data.split("_", 1)[1]
-    state["venue"] = v
-    state["venue_typical"] = None
-    state["rooms"] = []
-    state["features"] = {}
+    state["venue"] = q.data.split("_", 1)[1]
     state["pending"] = "wizard_privacy"
     text, markup = _privacy_prompt(state)
     await q.edit_message_text(text, reply_markup=markup)
-
-
-async def room_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-    state = st.get_state(update.effective_user.id)
-    v = state.get("venue") or ""
-    if q.data == "room_done":
-        if not state.get("rooms"):
-            await q.edit_message_text("Pick at least one room.")
-            return
-        await q.edit_message_text("Now the features.",
-                                  reply_markup=present_feature_keyboard(v, state["rooms"], []))
-        return
-    if q.data == "room_custom":
-        state["pending"] = "custom_rooms"
-        await q.edit_message_text("Add a room name.")
-        return
-    if q.data.startswith("xroom_"):
-        i = int(q.data.split("_", 1)[1])
-        pool = state.get("room_pool") or []
-        if 0 <= i < len(pool):
-            _toggle(state.setdefault("rooms", []), pool[i])
-        await q.edit_message_reply_markup(reply_markup=room_keyboard(v, state["rooms"], pool))
-        return
-    rooms = venue.rooms_for_venue(v)
-    i = int(q.data.split("_", 1)[1])
-    if 0 <= i < len(rooms):
-        _toggle(state.setdefault("rooms", []), rooms[i])
-    await q.edit_message_reply_markup(reply_markup=room_keyboard(v, state["rooms"]))
-
-
-async def present_feature_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-    state = st.get_state(update.effective_user.id)
-    v = state.get("venue") or ""
-    rooms = state.get("rooms") or []
-    feats = state.setdefault("features", {})
-    if q.data == "pf_done":
-        await show_probes(q, update.effective_user.id, v, rooms,
-                          [f for g in feats.values() for f in g])
-        return
-    if q.data == "pf_custom":
-        state["pending"] = "custom_features"
-        await q.edit_message_text("Describe the feature.")
-        return
-    _, ri, fi = q.data.split("_")
-    ri, fi = int(ri), int(fi)
-    if 0 <= ri < len(rooms):
-        opts = venue.present_features(v, rooms[ri])
-        if 0 <= fi < len(opts):
-            _toggle(feats.setdefault(rooms[ri], []), opts[fi])
-    await q.edit_message_reply_markup(reply_markup=present_feature_keyboard(
-        v, rooms, [f for g in feats.values() for f in g]))
-
-
-async def show_probes(q, user_id, v, rooms, chosen):
-    state = st.get_state(user_id)
-    baseline = venue.probe_options(v, rooms)
-    known = [*rooms, *chosen, *baseline]
-    await q.edit_message_text("Working out the details...")
-    try:
-        ai = await asyncio.wait_for(venice.generate_probes(v, rooms, known), timeout=20)
-    except Exception:
-        ai = []
-    pool = (baseline + ai)[:venue.MAX_PROBES]
-    state["probe_pool"] = pool
-    state["probes"] = []
-    await q.edit_message_text(venue.probe_question(rooms),
-                              reply_markup=probe_keyboard(pool, []))
-
-
-async def probe_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-    state = st.get_state(update.effective_user.id)
-    pool = state.get("probe_pool") or []
-    if q.data == "probe_done":
-        await commit_location(q, update.effective_user.id)
-        return
-    if q.data == "probe_custom":
-        state["pending"] = "custom_probe"
-        await q.edit_message_text("Describe it.")
-        return
-    i = int(q.data.split("_", 1)[1])
-    if 0 <= i < len(pool):
-        _toggle(state.setdefault("probes", []), pool[i])
-    await q.edit_message_reply_markup(reply_markup=probe_keyboard(pool, state["probes"]))
-
-
-async def commit_location(q, user_id):
-    state = st.get_state(user_id)
-    v = state.get("venue") or ""
-    rooms = state.get("rooms") or []
-    feats = state.get("features") or {}
-    probes = state.get("probes") or []
-    lines = [f"Venue: {v}"]
-    for room in rooms:
-        picked = feats.get(room, [])
-        lines.append(f"{room}: " + (", ".join(picked) if picked else "as is"))
-    if probes:
-        lines.append("Also: " + ", ".join(probes))
-    notes = "\n".join(lines)
-    state["location"] = v
-    state["location_notes"] = notes
-    state["pending"] = None
-    await q.edit_message_text(f"{notes}\n\nWho is present?", reply_markup=present_keyboard())
 
 
 async def present_callback(update, context):
@@ -608,19 +411,12 @@ async def present_callback(update, context):
     state = st.get_state(update.effective_user.id)
     state["context_others"] = kind
     state["context_alone"] = (kind == "alone")
-    if kind == "kids":
-        cur = state.get("risk_level") or 5
-        if cur > 2:
-            state["risk_pre_kids"] = cur
-            state["risk_level"] = 2
-    elif state.get("risk_pre_kids"):
-        state["risk_level"] = state["risk_pre_kids"]
-        state["risk_pre_kids"] = None
+    state["location"] = state.get("venue") or ""
+    state["pending"] = None
     current = venue.normalise_privacy(state.get("privacy")) or venue.privacy_default(
         state.get("venue") or "")
     await q.edit_message_text(
-        f"{state.get('location_notes') or ''}\n\nCover: {venue.PRIVACY_LABELS[current]}\n\n"
-        f"Use /task when ready.",
+        f"Cover: {venue.PRIVACY_LABELS[current]}\n\n/task when ready.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Clear", callback_data="loc_clear")]]))
 
 
@@ -646,38 +442,18 @@ async def privacy_callback(update, context):
     if state.get("pending") == "wizard_privacy":
         state["pending"] = None
         if venue.exposure_rank(level) >= 2:
-            # Public: the place is only a backdrop, so nothing else is collected.
-            state["rooms"] = []
-            state["features"] = {}
-            state["probes"] = []
-            state["room_pool"] = []
-            state["venue_typical"] = None
+            state["context_others"] = "public"
             state["location"] = v
-            state["location_notes"] = f"Venue: {v}"
             await q.edit_message_text(
                 f"Locked in - {venue.PRIVACY_LABELS[level]}.\n{venue.PRIVACY_DESC[level]}\n\n"
-                f"{v}\n\nNo features needed - take it wherever you can. /task when ready.",
-                reply_markup=clear)
+                f"{v}\n\n/task when ready.", reply_markup=clear)
             return
-        if venue.rooms_for_venue(v):
-            await q.edit_message_text("Which rooms?", reply_markup=room_keyboard(v, []))
-            return
-        notice = await q.edit_message_text("Working out the layout...")
-        try:
-            suggestions, typical = await asyncio.wait_for(
-                asyncio.gather(venice.generate_rooms(v),
-                               venice.generate_venue_typical(v)), timeout=20)
-        except Exception:
-            suggestions, typical = [], []
-        state["room_pool"] = suggestions
-        state["venue_typical"] = ", ".join(typical)
-        await notice.edit_text(f"{v.title()}. Which parts are in play?",
-                               reply_markup=room_keyboard(v, [], suggestions))
+        await q.edit_message_text(f"{v}.\n\nWho's about?", reply_markup=present_keyboard())
         return
 
     await q.edit_message_text(
         f"Locked in - {venue.PRIVACY_LABELS[level]}.\n{venue.PRIVACY_DESC[level]}\n\n"
-        f"{state.get('location_notes') or ''}\n\nUse /task.", reply_markup=clear)
+        f"{state.get('location') or ''}\n\nUse /task.", reply_markup=clear)
 
 
 async def clear_location(update, context):
@@ -1329,9 +1105,6 @@ def main():
     app.add_handler(CallbackQueryHandler(gender_callback, pattern="^gender_"))
     app.add_handler(CallbackQueryHandler(outfit_callback, pattern="^outfit_"))
     app.add_handler(CallbackQueryHandler(venue_callback, pattern="^venue_"))
-    app.add_handler(CallbackQueryHandler(room_callback, pattern="^room_|^xroom_"))
-    app.add_handler(CallbackQueryHandler(present_feature_callback, pattern="^pf_"))
-    app.add_handler(CallbackQueryHandler(probe_callback, pattern="^probe_"))
     app.add_handler(CallbackQueryHandler(clear_location, pattern="^loc_clear$"))
     app.add_handler(CallbackQueryHandler(present_callback, pattern="^present_"))
     app.add_handler(CallbackQueryHandler(privacy_callback, pattern="^privacy_"))
