@@ -82,6 +82,7 @@ DISRESPECTFUL = ["fuck", "shit", "bitch", "stupid", "dumb", "hate", "suck", "idi
 INTENSITY_LEVELS = (("gentle", "Gentle"), ("standard", "Standard"), ("harsh", "Harsh"))
 
 TASK_PIC_CHANCE = float(os.getenv("TASK_PIC_CHANCE", "0.3"))
+REWARD_POINTS = int(os.getenv("REWARD_POINTS", "200"))
 
 
 def get_title(gender):
@@ -125,12 +126,6 @@ def gender_keyboard():
                                  [InlineKeyboardButton("Female", callback_data="gender_female")],
                                  [InlineKeyboardButton("Trans", callback_data="gender_trans")],
                                  [InlineKeyboardButton("Non-binary", callback_data="gender_nonbinary")]])
-
-app.add_handler(CallbackQueryHandler(avatar_gender_callback, pattern="^av_gender_"))
-    app.add_handler(CallbackQueryHandler(avatar_race_callback, pattern="^av_race_"))
-    app.add_handler(CallbackQueryHandler(avatar_build_callback, pattern="^av_build_"))
-    app.add_handler(CallbackQueryHandler(avatar_hair_callback, pattern="^av_hair_"))
-    app.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
 
 
 def present_keyboard():
@@ -195,7 +190,7 @@ def _task_header(delta, label, baseline, risk, intensity):
     return "\n".join(bits) + "\n\n"
 
 
-async def generate_avatar(state, *, nude=False):
+async def generate_avatar(state, *, nude=False, scene_extra=""):
     gender = state.get("avatar_gender") or state.get("gender") or "female"
     spec = venice.get_spec(state.get("reward_model") if nude else None, nude=nude)
 
@@ -204,7 +199,8 @@ async def generate_avatar(state, *, nude=False):
             return prompts.build(subject_clause(state), nude=True,
                                  gear=random.choice(REWARD_GEAR),
                                  pose=random.choice(REWARD_POSES),
-                                 clause=GENITAL_CLAUSE.get(gender, "genitals clearly visible"))
+                                 clause=GENITAL_CLAUSE.get(gender, "genitals clearly visible"),
+                                 scene=scene_extra)
         outfits = DOMINANT_OUTFITS_MALE if gender == "male" else DOMINANT_OUTFITS_FEMALE
         return prompts.build(subject_clause(state), nude=False,
                              pose=random.choice(DOMINANT_POSES),
@@ -213,15 +209,32 @@ async def generate_avatar(state, *, nude=False):
     return await render.render_best(spec, build)
 
 
-async def deliver_reward(bot, user_id, *, caption):
+async def deliver_reward(bot, user_id, *, caption, wish=""):
     state = st.get_state(user_id)
-    png = await generate_avatar(state, nude=True)
-    verdict = await verify.nude_check(png)
-    if verdict == "COVERED":
-        retry = await generate_avatar(state, nude=True)
-        if await verify.nude_check(retry) != "COVERED":
-            png = retry
+    png = await generate_avatar(state, nude=True, scene_extra=wish)
     await storage.deliver(bot, user_id, user_id, png, caption=caption, prefix="reward")
+
+
+async def ask_reward(update, context, user_id):
+    st.get_state(user_id)["pending"] = "reward_wish"
+    await update.effective_message.reply_text(
+        "Reward earned. What do you want to see?",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Anything", callback_data="wish_skip")]]))
+
+
+async def wish_skip_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    user_id = update.effective_user.id
+    st.get_state(user_id)["pending"] = None
+    await q.edit_message_text("Coming up...")
+    try:
+        await deliver_reward(context.bot, user_id,
+                             caption=f"Yours, {get_title(st.get_state(user_id).get('avatar_gender'))}.")
+    except Exception:
+        logger.exception("reward failed")
+        await q.edit_message_text("Render failed.")
 
 
 async def custom_input(update, context):
@@ -230,6 +243,18 @@ async def custom_input(update, context):
         return
     state = st.get_state(user.id)
     pending = state.get("pending")
+    if pending == "reward_wish":
+        wish = msg.text.strip()[:200]
+        state["pending"] = None
+        await msg.reply_text("Coming up...")
+        try:
+            await deliver_reward(context.bot, user.id,
+                                 caption=f"Yours, {get_title(state.get('avatar_gender'))}.",
+                                 wish=wish)
+        except Exception:
+            logger.exception("reward failed")
+            await msg.reply_text("Render failed.")
+        return
     if pending == "custom_location":
         place = msg.text.strip()[:60]
         state["venue"] = place
@@ -345,6 +370,7 @@ async def test_cmd(update, context):
         f"pending: {state.get('pending')}\nlocation: {state.get('location') or 'unset'}\n"
         f"outfit: {state.get('outfit_detail') or 'none'}\n"
         f"privacy: {state.get('privacy')}\nintensity: {state.get('intensity') or 'standard'}\n"
+        f"points: {state.get('points') or 0} reward at: {REWARD_POINTS}\n"
         f"task pic chance: {TASK_PIC_CHANCE}\n"
         f"model: {venice.IMAGE_MODEL} -> {venice.IMAGE_FALLBACKS}\n"
         f"upscale: {os.getenv('IMAGE_UPSCALE', '2')} sharpen: {os.getenv('IMAGE_SHARPEN', '1')}")
@@ -647,15 +673,19 @@ async def status_cmd(update, context):
 
 async def rewards_cmd(update, context):
     state = st.get_state(update.effective_user.id)
-    need = tk.reward_threshold(state.get("streak") or 0)
     await update.effective_message.reply_text(
-        f"Rewards unlock every {need} completions.\n\nStreak: {state.get('streak') or 0}\n"
-        f"Progress: {state.get('challenges_since_reward') or 0}/{need}\n\n/reward to trigger one now.")
+        f"Rewards fire automatically at {REWARD_POINTS} points.\n\n"
+        f"Points: {state.get('points') or 0}\n\n/reward to trigger one now, free.")
 
 
 async def complete_callback(update, context):
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("Send photo proof.")
+    q = update.callback_query
+    await q.answer()
+    try:
+        await q.edit_message_text("Send photo proof.")
+    except Exception:
+        logger.exception("complete prompt failed")
+        await context.bot.send_message(chat_id=update.effective_user.id, text="Send photo proof.")
 
 
 async def blocked_callback(update, context):
@@ -831,21 +861,12 @@ async def handle_photo(update, context):
             state["points"] = (state.get("points") or 0) + 10 * task.risk_level
             state["streak"] = (state.get("streak") or 0) + 1
             state["completed_tasks"] = (state.get("completed_tasks") or 0) + 1
-            state["challenges_since_reward"] = (state.get("challenges_since_reward") or 0) + 1
             session.commit()
             gain = 10 * task.risk_level
-            need = tk.reward_threshold(state["streak"], task.exposure or 0)
-            if state["challenges_since_reward"] >= need:
-                state["challenges_since_reward"] = 0
-                await update.message.reply_text(f"+{gain} points. Streak {state['streak']}.\n\nReward earned.")
-                try:
-                    await deliver_reward(context.bot, user.id,
-                                         caption=f"Yours, {get_title(state.get('avatar_gender'))}.")
-                except Exception:
-                    logger.exception("reward failed")
-                    await update.message.reply_text("Reward render failed.")
-            else:
-                await update.message.reply_text(f"+{gain} points. Streak {state['streak']}.")
+            await update.message.reply_text(f"+{gain} points. Streak {state['streak']}.")
+            if state["points"] >= REWARD_POINTS:
+                state["points"] -= REWARD_POINTS
+                await ask_reward(update, context, user.id)
             return
 
         if task.verification_attempts >= 3:
@@ -995,13 +1016,7 @@ async def debugavatar_cmd(update, context):
 
 
 async def reward_cmd(update, context):
-    user = update.effective_user
-    await update.effective_message.reply_text("One sec...")
-    try:
-        await deliver_reward(context.bot, user.id,
-                             caption=f"Yours, {get_title(st.get_state(user.id).get('avatar_gender'))}.")
-    except Exception as exc:
-        await update.effective_message.reply_text(f"Failed: {exc}")
+    await ask_reward(update, context, update.effective_user.id)
 
 
 async def resetowner_cmd(update, context):
@@ -1109,6 +1124,11 @@ def main():
     app.add_handler(CommandHandler("rewards", rewards_cmd))
 
     app.add_handler(CallbackQueryHandler(gender_callback, pattern="^gender_"))
+    app.add_handler(CallbackQueryHandler(avatar_gender_callback, pattern="^av_gender_"))
+    app.add_handler(CallbackQueryHandler(avatar_race_callback, pattern="^av_race_"))
+    app.add_handler(CallbackQueryHandler(avatar_build_callback, pattern="^av_build_"))
+    app.add_handler(CallbackQueryHandler(avatar_hair_callback, pattern="^av_hair_"))
+    app.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
     app.add_handler(CallbackQueryHandler(outfit_callback, pattern="^outfit_"))
     app.add_handler(CallbackQueryHandler(venue_callback, pattern="^venue_"))
     app.add_handler(CallbackQueryHandler(clear_location, pattern="^loc_clear$"))
@@ -1116,6 +1136,7 @@ def main():
     app.add_handler(CallbackQueryHandler(privacy_callback, pattern="^privacy_"))
     app.add_handler(CallbackQueryHandler(intensity_callback, pattern="^intensity_"))
     app.add_handler(CallbackQueryHandler(risk_callback, pattern="^risk_"))
+    app.add_handler(CallbackQueryHandler(wish_skip_callback, pattern="^wish_skip$"))
     app.add_handler(CallbackQueryHandler(kink_menu_callback, pattern="^kinkmenu_"))
     app.add_handler(CallbackQueryHandler(kink_set_callback, pattern="^kinkset_"))
     app.add_handler(CallbackQueryHandler(kinks_back_callback, pattern="^kinks_back$"))
