@@ -126,6 +126,12 @@ def gender_keyboard():
                                  [InlineKeyboardButton("Trans", callback_data="gender_trans")],
                                  [InlineKeyboardButton("Non-binary", callback_data="gender_nonbinary")]])
 
+app.add_handler(CallbackQueryHandler(avatar_gender_callback, pattern="^av_gender_"))
+    app.add_handler(CallbackQueryHandler(avatar_race_callback, pattern="^av_race_"))
+    app.add_handler(CallbackQueryHandler(avatar_build_callback, pattern="^av_build_"))
+    app.add_handler(CallbackQueryHandler(avatar_hair_callback, pattern="^av_hair_"))
+    app.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
+
 
 def present_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton(o["name"], callback_data=f"present_{k}")]
