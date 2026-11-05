@@ -220,6 +220,14 @@ def _toggle(bucket, item):
     return bucket
 
 
+def _exposure_note(delta, label, baseline, risk, max_risk):
+    if not delta:
+        return ""
+    over = " - past your usual ceiling" if risk > max_risk else ""
+    return (f"Exposure: {label} - you set {baseline}, this one steps out\n"
+            f"Risk {risk}/5{over}\n\n")
+
+
 async def generate_avatar(state, *, nude=False):
     gender = state.get("avatar_gender") or state.get("gender") or "female"
     spec = venice.get_spec(state.get("reward_model") if nude else None, nude=nude)
@@ -282,18 +290,24 @@ async def custom_input(update, context):
         state["rooms"] = []
         state["features"] = {}
         state["venue_typical"] = None
+        state["room_pool"] = []
         state["pending"] = None
-        notice = await msg.reply_text("Working out the layout...")
+        notice = await msg.reply_text(f"{place.title()}. Which parts are in play?",
+                                      reply_markup=room_keyboard(place, [], []))
         try:
-            suggestions = await venice.generate_rooms(place)
-            typical = await venice.generate_venue_typical(place)
+            suggestions, typical = await asyncio.wait_for(
+                asyncio.gather(venice.generate_rooms(place),
+                               venice.generate_venue_typical(place)), timeout=20)
         except Exception:
-            logger.warning("layout lookup failed")
-            suggestions, typical = [], []
+            logger.warning("layout lookup failed or timed out")
+            return
         state["room_pool"] = suggestions
         state["venue_typical"] = ", ".join(typical)
-        await notice.edit_text(f"{place.title()}. Which parts are in play?",
-                               reply_markup=room_keyboard(place, [], suggestions))
+        try:
+            await notice.edit_text(f"{place.title()}. Which parts are in play?",
+                                   reply_markup=room_keyboard(place, [], suggestions))
+        except Exception:
+            pass
         return
     if pending == "custom_rooms":
         supplied = [p.strip() for p in msg.text.split(",") if p.strip()]
@@ -301,11 +315,10 @@ async def custom_input(update, context):
             await msg.reply_text("Nothing usable. Try again.")
             return
         state["pending"] = None
+        state["rooms"] = (state.get("rooms") or []) + supplied
         if venue.rooms_for_venue(state.get("venue") or ""):
-            state["rooms"] = (state.get("rooms") or []) + supplied
             await msg.reply_text("Added.", reply_markup=room_keyboard(state.get("venue") or "", state["rooms"]))
         else:
-            state["rooms"] = (state.get("rooms") or []) + supplied
             await msg.reply_text("Now the features inside those rooms.",
                                  reply_markup=present_feature_keyboard(state.get("venue") or "", state["rooms"], []))
         return
@@ -567,7 +580,7 @@ async def show_probes(q, user_id, v, rooms, chosen):
     known = [*rooms, *chosen, *baseline]
     await q.edit_message_text("Working out the details...")
     try:
-        ai = await venice.generate_probes(v, rooms, known)
+        ai = await asyncio.wait_for(venice.generate_probes(v, rooms, known), timeout=20)
     except Exception:
         ai = []
     pool = (baseline + ai)[:venue.MAX_PROBES]
@@ -741,14 +754,6 @@ async def schedule_callback(update, context):
         await q.edit_message_text("Auto tasks off.")
 
 
-def _exposure_note(delta, label, baseline, risk, max_risk):
-    if not delta:
-        return ""
-    over = " - past your usual ceiling" if risk > max_risk else ""
-    return (f"Exposure: {label} - you set {baseline}, this one steps out\n"
-            f"Risk {risk}/5{over}\n\n")
-
-
 async def issue_task(update, context, label="TASK"):
     user = update.effective_user
     state = st.get_state(user.id)
@@ -769,14 +774,13 @@ async def issue_task(update, context, label="TASK"):
             await update.effective_message.reply_text(f"Pending! {max(0, left):.0f} minutes left.")
             return
         await update.effective_message.reply_text("Generating...")
-        if random.random() < 0.3 and state.get("avatar_gender"):
-            try:
-                png = await generate_avatar(state)
-                await storage.deliver(context.bot, user.id, user.id, png,
-                                      caption="Your task awaits...", prefix="avatar")
-            except Exception:
-                logger.warning("pre-task avatar failed")
-        text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        try:
+            text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        except Exception as exc:
+            logger.exception("task generation failed")
+            await update.effective_message.reply_text(
+                f"Couldn't write that one - {type(exc).__name__}: {exc}")
+            return
         now = datetime.now(timezone.utc)
         task = st.Task(user_id=user.id, task_text=text, risk_level=risk, created_at=now,
                        exposure=delta, exposure_label=exposure,
@@ -790,6 +794,13 @@ async def issue_task(update, context, label="TASK"):
         await update.effective_message.reply_text(
             f"{label}\n\n{note}{text}\n\n30 minutes.",
             reply_markup=task_keyboard(task.id, get_title(state.get("avatar_gender"))))
+        if random.random() < 0.3 and state.get("avatar_gender"):
+            try:
+                png = await generate_avatar(state)
+                await storage.deliver(context.bot, user.id, user.id, png,
+                                      caption="Your task awaits...", prefix="avatar")
+            except Exception:
+                logger.warning("pre-task avatar failed")
     finally:
         session.close()
 
@@ -870,7 +881,12 @@ async def blocker_input(update, context):
                                               expires_at=now + timedelta(hours=3)))
         session.commit()
         await update.effective_message.reply_text("Reworking it.")
-        new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        try:
+            new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        except Exception as exc:
+            logger.exception("rework generation failed")
+            await update.effective_message.reply_text(f"Couldn't rework - {type(exc).__name__}: {exc}")
+            return
         task.task_text, task.risk_level = new, risk
         task.exposure, task.exposure_label = delta, exposure
         task.verification_attempts, task.followup_target = 0, None
@@ -899,7 +915,13 @@ async def mercy_callback(update, context):
             await q.edit_message_text("No active task.")
             return
         await q.edit_message_text("Mercy granted. Finding something else...")
-        new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        try:
+            new, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+        except Exception as exc:
+            logger.exception("mercy generation failed")
+            await context.bot.send_message(chat_id=user.id,
+                                           text=f"Couldn't write one - {type(exc).__name__}: {exc}")
+            return
         now = datetime.now(timezone.utc)
         task.task_text, task.risk_level = new, risk
         task.exposure, task.exposure_label = delta, exposure
@@ -1196,7 +1218,12 @@ async def scheduled_check(context):
             if not state.get("gender") or not state.get("location"):
                 state["next_task_time"] = now + timedelta(minutes=15)
                 continue
-            text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+            try:
+                text, risk, delta, exposure = await tk.generate_task_text(state, session, voice=DOM_VOICE)
+            except Exception:
+                logger.exception(f"auto task generation failed for {row.user_id}")
+                state["next_task_time"] = now + timedelta(minutes=15)
+                continue
             task = st.Task(user_id=row.user_id, task_text=text, risk_level=risk, created_at=now,
                            exposure=delta, exposure_label=exposure,
                            expires_at=now + timedelta(minutes=30))
@@ -1289,11 +1316,6 @@ def main():
     app.add_handler(CallbackQueryHandler(schedule_callback, pattern="^sched_"))
     app.add_handler(CallbackQueryHandler(autopics_callback, pattern="^autopics_toggle$"))
     app.add_handler(CallbackQueryHandler(reset_callback, pattern="^reset_"))
-    app.add_handler(CallbackQueryHandler(avatar_gender_callback, pattern="^av_gender_"))
-    app.add_handler(CallbackQueryHandler(avatar_race_callback, pattern="^av_race_"))
-    app.add_handler(CallbackQueryHandler(avatar_build_callback, pattern="^av_build_"))
-    app.add_handler(CallbackQueryHandler(avatar_hair_callback, pattern="^av_hair_"))
-    app.add_handler(CallbackQueryHandler(avatar_size_callback, pattern="^av_size_"))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom_input))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
