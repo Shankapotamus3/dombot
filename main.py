@@ -11,7 +11,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, CallbackQueryHandler,
                           MessageHandler, ContextTypes, filters)
 
-from core import state as st, venice, render, verify, venue, tasks as tk, prompts, storage, framing
+from core import (state as st, venice, render, verify, venue, tasks as tk,
+                  prompts, storage, framing, slots)
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -68,6 +69,18 @@ VOICE:
 - Praise is earned and specific. When he fails: name it plainly, then make him do it again.
 - Pet names sparingly: "pet", "sweetheart", "doll". Never stacked.
 
+LENGTH:
+- Three short paragraphs maximum. Two is usually enough.
+- One emoji per paragraph at most. Most sentences get none.
+- Answer what was actually asked. If they tell you something changed, address that first.
+
+TRUTH:
+- You know the place, what they're wearing and the open task. Nothing else. Do not invent a venue,
+  a member of staff, a game, or a rule you were not told.
+- Use the place's own vocabulary. A bowling alley has lanes, not tables.
+- Do not promise they will not be caught. State the risk and what covers it.
+- If you genuinely do not know something, say so in one clause and move on.
+
 DOMINANCE:
 - You decide. Risk, gear, position - you call it.
 - State tasks as orders, present tense. "You're going to hold that." Not "would you like to."
@@ -77,7 +90,7 @@ RULES:
 - Never break character, never mention being an AI.
 - Never explain the task format - just give the task.
 - Keep the voice through task text too.
-- Telegram markdown only, no headers. Emojis sparing."""
+- Telegram markdown only, no headers."""
 
 DOM_POSES = [
     "standing, arms folded, chin lifted",
@@ -114,10 +127,6 @@ REWARD_GEAR = ["nothing but a leather collar", "a leather collar and wrist cuffs
                "a black leather collar", "a chest harness and nothing else"]
 
 TASK_MODELS = ["chroma", "lustify-v8", "wai-illu"]
-GREETINGS = ["hi", "hello", "hey", "good morning", "good evening", "hiya", "howdy"]
-TASK_INQUIRIES = ["task", "my task", "current task", "what task", "any task", "status", "check task"]
-COMPLIMENTS = ["beautiful", "sexy", "hot", "gorgeous", "pretty", "cute", "perfect", "love you"]
-DISRESPECTFUL = ["fuck", "shit", "bitch", "stupid", "dumb", "hate", "idiot", "moron"]
 
 
 def get_title(_=None):
@@ -185,8 +194,7 @@ def privacy_keyboard(selected=None):
 
 
 def _privacy_prompt(state):
-    current = venue.normalise_privacy(state.get("privacy")) or venue.privacy_default(
-        state.get("venue") or "")
+    current = venue.normalise_privacy(state.get("privacy")) or tk.privacy_default(state)
     lines = "\n".join(f"{i}. {short}: {desc}"
                       for i, (_, short, desc) in enumerate(venue.PRIVACY_LEVELS, start=1))
     return (f"How much cover have you got?\n\n1 is safest, 4 is most exposed.\n\n{lines}\n\n"
@@ -292,6 +300,62 @@ def _task_header(risk, intensity):
     return f"Risk {risk}/5 ({intensity})\n\n"
 
 
+def _chat_context(state):
+    bits = []
+    if state.get("location"):
+        bits.append(f"Place: {state['location']}")
+    if state.get("hide_spot"):
+        bits.append(f"Their way out of sight: {state['hide_spot']}")
+    worn = tk.worn_line(state)
+    if worn and worn != "clothing":
+        bits.append(f"They are wearing: {worn}")
+    if state.get("intensity"):
+        bits.append(f"Intensity: {state['intensity']}")
+    return "\n".join(bits)
+
+
+async def _warn_if_open_task(update, user_id):
+    session = st.get_session()
+    try:
+        open_task = session.query(st.Task).filter_by(user_id=user_id, status="pending").first()
+    finally:
+        session.close()
+    if open_task:
+        await update.effective_message.reply_text(
+            "That task was written for the old outfit - press Not possible on it if it no longer fits.")
+
+
+def _slot_prompt(key, state):
+    if key == "gender":
+        return "First - gender:", gender_keyboard()
+    if key == "location":
+        return "Where are you right now?", venue_keyboard()
+    if key == "outfit":
+        return "What are you wearing?", outfit_keyboard()
+    if key == "privacy":
+        return _privacy_prompt(state)
+    if key == "hide_spot":
+        return ("If someone came, where would you get to? A doorway, a corner, behind "
+                "something.\n\nOne line, or /skip."), None
+    return None, None
+
+
+async def ask_slot(bot, chat_id, state, key):
+    text, markup = _slot_prompt(key, state)
+    state["pending"] = f"slot_{key}"
+    slots.mark_asked(state, key)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+
+
+async def _after_slot(update, user_id):
+    state = st.get_state(user_id)
+    gap = slots.next_gap(state)
+    if gap:
+        await ask_slot(update.get_bot(), user_id, state, gap)
+        return
+    await update.effective_message.reply_text("Got it. /task.")
+
+
 async def generate_render(state, *, nude=None, scene_extra=""):
     g = avatar_gender(state)
     if nude is None:
@@ -365,24 +429,26 @@ async def custom_input(update, context):
             logger.exception("reward failed")
             await msg.reply_text("Render failed.")
         return
-    if pending == "custom_location":
+    if pending in ("slot_location", "custom_location"):
         place = msg.text.strip()[:60]
         state["venue"] = place
+        state["venue_profile"] = None
+        state["hide_spot"] = None
         state["pending"] = "wizard_privacy"
         text, markup = _privacy_prompt(state)
         await msg.reply_text(text, reply_markup=markup)
         return
-    if pending == "custom_outfit":
-        state["current_outfit"] = "Custom: " + msg.text.strip()[:50]
+    if pending in ("slot_outfit", "outfit_detail"):
+        state["current_outfit"] = state.get("current_outfit") or "Custom"
         state["outfit_detail"] = msg.text.strip()[:300]
         state["outfit_items"] = [i.strip() for i in msg.text.split(",")][:6]
         state["pending"] = None
-        await msg.reply_text("Noted. Use /location.")
+        await _after_slot(update, user.id)
         return
-    if pending == "outfit_detail":
-        state["outfit_detail"] = msg.text.strip()[:300]
+    if pending in ("slot_hide_spot", "hide_spot"):
+        state["hide_spot"] = msg.text.strip()[:80]
         state["pending"] = None
-        await msg.reply_text("Noted.")
+        await _after_slot(update, user.id)
         return
     if pending == "interval":
         parts = msg.text.strip().lower().split()
@@ -411,24 +477,32 @@ async def chat_handler(update, context):
     if not msg or not user or not msg.text or msg.text.startswith("/"):
         return
     state = st.get_state(user.id)
+    session = st.get_session()
+    try:
+        task = session.query(st.Task).filter_by(user_id=user.id, status="pending").first()
+    finally:
+        session.close()
+    extra = _chat_context(state)
+    if task:
+        extra += f"\nOpen task: {task.task_text[:300]}"
+    system = DOM_VOICE + (f"\n\nCURRENT SITUATION:\n{extra}" if extra else "")
     history = state.setdefault("history", [])
     history.append({"role": "user", "content": msg.text.strip()})
     state["history"] = history[-20:]
     await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
-    reply = await venice.chat(state["history"], DOM_VOICE, temperature=0.9)
+    reply = await venice.chat(state["history"], system, temperature=0.9)
     if not reply:
         reply = "Say that again."
     state["history"] = (state["history"] + [{"role": "assistant", "content": reply}])[-20:]
-    await msg.reply_text(reply[:4000])
+    await msg.reply_text(reply[:1200])
 
 
 async def start_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     if not state.get("gender"):
-        await update.effective_message.reply_text("First - gender:", reply_markup=gender_keyboard())
+        await ask_slot(context.bot, update.effective_chat.id, state, "gender")
         return
-    cover = venue.normalise_privacy(state.get("privacy")) or venue.privacy_default(
-        state.get("location") or "")
+    cover = venue.normalise_privacy(state.get("privacy")) or tk.privacy_default(state)
     await update.effective_message.reply_text(
         f"Back again.\n\n{state.get('location') or 'No location set'} | "
         f"{state.get('intensity') or 'standard'} | cover: {venue.PRIVACY_LABELS[cover]} | "
@@ -439,7 +513,7 @@ async def start_cmd(update, context):
 async def help_cmd(update, context):
     await update.effective_message.reply_text(
         "/task a challenge\n/location venue and rooms\n/outfit what you're wearing\n"
-        "/avatar her photo\n/reward a reward render\n"
+        "/details fill in what's missing\n/avatar her photo\n/reward a reward render\n"
         "/variant clothed or nude\n/privacy how much cover\n/intensity how hard\n"
         "/kinks /schedule /interval /settings /rewards /status\n/clear /reset",
         reply_markup=main_menu())
@@ -447,15 +521,15 @@ async def help_cmd(update, context):
 
 async def settings_cmd(update, context):
     state = st.get_state(update.effective_user.id)
-    cover = venue.normalise_privacy(state.get("privacy")) or venue.privacy_default(
-        state.get("location") or "")
+    cover = venue.normalise_privacy(state.get("privacy")) or tk.privacy_default(state)
     await update.effective_message.reply_text(
         f"avatar: {state.get('avatar_race') or 'unset'} {avatar_gender(state)} "
         f"{state.get('avatar_build') or ''} {state.get('avatar_hair') or ''}\n"
         f"variant: {state.get('variant') or 'clothed'}\n"
         f"cover: {venue.PRIVACY_LABELS[cover]}\n"
         f"intensity: {state.get('intensity') or 'standard'}\n"
-        f"outfit: {state.get('outfit_detail') or state.get('current_outfit') or 'unset'}\n"
+        f"outfit: {tk.worn_line(state)}\n"
+        f"hide spot: {state.get('hide_spot') or 'unset'}\n"
         f"task model: {state.get('task_model') or venice.IMAGE_MODEL}\n"
         f"reward model: {state.get('reward_model') or venice.IMAGE_MODEL_REWARD}\n"
         f"location: {state.get('location') or 'unset'}\n"
@@ -463,6 +537,18 @@ async def settings_cmd(update, context):
         f"reward at: {REWARD_POINTS} pts\n"
         f"points: {state.get('points') or 0} streak: {state.get('streak') or 0}",
         reply_markup=main_menu())
+
+
+async def details_cmd(update, context):
+    state = st.get_state(update.effective_user.id)
+    gap = slots.next_gap(state)
+    if not gap:
+        await update.effective_message.reply_text(
+            f"All set.\n\nwearing: {tk.worn_line(state)}\n"
+            f"place: {state.get('location') or 'unset'}\n"
+            f"hide: {state.get('hide_spot') or 'unset'}")
+        return
+    await ask_slot(context.bot, update.effective_chat.id, state, gap)
 
 
 async def menu_callback(update, context):
@@ -601,6 +687,7 @@ async def privacy_callback(update, context):
     await q.answer()
     user = update.effective_user
     state = st.get_state(user.id)
+    was_slot = (state.get("pending") or "").startswith("slot_")
     level = q.data.split("_", 1)[1]
     if level not in venue.PRIVACY_LABELS:
         await q.edit_message_text("Unknown level.")
@@ -617,13 +704,18 @@ async def privacy_callback(update, context):
             await q.edit_message_text(
                 f"Locked in - {venue.PRIVACY_LABELS[level]}.\n{venue.PRIVACY_DESC[level]}\n\n"
                 f"{v}\n\n/task when ready.", reply_markup=clear)
-            return
-        await q.edit_message_text(f"{v}.\n\nWho's about?", reply_markup=present_keyboard())
+        else:
+            await q.edit_message_text(f"{v}.\n\nWho's about?", reply_markup=present_keyboard())
+        if was_slot:
+            await _after_slot(update, user.id)
         return
 
     await q.edit_message_text(
         f"{venue.PRIVACY_LABELS[level]}.\n{venue.PRIVACY_DESC[level]}\n\n"
         f"{state.get('location') or ''}\n\n/task when ready.", reply_markup=clear)
+    if was_slot:
+        state["pending"] = None
+        await _after_slot(update, user.id)
 
 
 async def present_callback(update, context):
@@ -635,8 +727,7 @@ async def present_callback(update, context):
     state["context_alone"] = (kind == "alone")
     state["location"] = state.get("venue") or ""
     state["pending"] = None
-    current = venue.normalise_privacy(state.get("privacy")) or venue.privacy_default(
-        state.get("venue") or "")
+    current = venue.normalise_privacy(state.get("privacy")) or tk.privacy_default(state)
     await q.edit_message_text(
         f"Cover: {venue.PRIVACY_LABELS[current]}\n\n/task when ready.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Clear", callback_data="loc_clear")]]))
@@ -722,6 +813,8 @@ async def location_cmd(update, context):
     state = st.get_state(update.effective_user.id)
     state["venue"] = None
     state["venue_typical"] = None
+    state["venue_profile"] = None
+    state["hide_spot"] = None
     state["pending"] = None
     await update.effective_message.reply_text("Where are we shooting?", reply_markup=venue_keyboard())
 
@@ -735,6 +828,8 @@ async def venue_callback(update, context):
         await q.edit_message_text("Name the place.")
         return
     state["venue"] = q.data.split("_", 1)[1]
+    state["venue_profile"] = None
+    state["hide_spot"] = None
     state["pending"] = "wizard_privacy"
     text, markup = _privacy_prompt(state)
     await q.edit_message_text(text, reply_markup=markup)
@@ -742,8 +837,10 @@ async def venue_callback(update, context):
 
 async def clear_location(update, context):
     state = st.get_state(update.effective_user.id)
-    for k in ("location", "location_notes", "rooms", "probes", "venue", "features", "venue_typical", "room_pool"):
-        state[k] = None if k in ("location", "location_notes", "venue", "venue_typical") else []
+    for k in ("location", "location_notes", "rooms", "probes", "venue", "features",
+              "venue_typical", "venue_profile", "hide_spot", "room_pool"):
+        state[k] = None if k in ("location", "location_notes", "venue", "venue_typical",
+                                 "venue_profile", "hide_spot") else []
     state["pending"] = None
     if update.callback_query:
         await update.callback_query.answer()
@@ -753,18 +850,22 @@ async def clear_location(update, context):
 
 
 async def gender_cmd(update, context):
-    await update.effective_message.reply_text("Gender:", reply_markup=gender_keyboard())
+    await ask_slot(context.bot, update.effective_chat.id, st.get_state(update.effective_user.id), "gender")
 
 
 async def gender_callback(update, context):
     q = update.callback_query
     await q.answer()
-    st.get_state(update.effective_user.id)["gender"] = q.data.split("_", 1)[1]
+    state = st.get_state(update.effective_user.id)
+    state["gender"] = q.data.split("_", 1)[1]
     await q.edit_message_text("Saved.", reply_markup=main_menu())
+    if (state.get("pending") or "").startswith("slot_"):
+        state["pending"] = None
+        await _after_slot(update, update.effective_user.id)
 
 
 async def outfit_cmd(update, context):
-    await update.effective_message.reply_text("What are you wearing?", reply_markup=outfit_keyboard())
+    await ask_slot(context.bot, update.effective_chat.id, st.get_state(update.effective_user.id), "outfit")
 
 
 async def outfit_callback(update, context):
@@ -779,8 +880,10 @@ async def outfit_callback(update, context):
     opt = tk.OUTFIT_OPTIONS[key]
     state["current_outfit"] = opt["name"]
     state["outfit_items"] = opt.get(f"{state.get('gender') or 'male'}_items", opt["male_items"])
+    state["outfit_detail"] = None
     state["pending"] = "outfit_detail"
     await q.edit_message_text(f"{opt['name']}, roughly. What are you actually in? Type it or /skip.")
+    await _warn_if_open_task(update, update.effective_user.id)
 
 
 async def kinks_cmd(update, context):
@@ -823,7 +926,13 @@ async def kinks_done_callback(update, context):
 
 
 async def skip_cmd(update, context):
-    st.get_state(update.effective_user.id)["pending"] = None
+    state = st.get_state(update.effective_user.id)
+    pending = state.get("pending") or ""
+    if pending.startswith("slot_"):
+        slots.mark_skipped(state, pending[5:])
+    if pending == "outfit_detail":
+        state["outfit_detail"] = None
+    state["pending"] = None
     await update.effective_message.reply_text("Fine. /task.")
 
 
@@ -860,14 +969,12 @@ async def issue_task(update, context, label="TASK"):
     state = st.get_state(user.id)
     session = st.get_session()
     try:
-        if not state.get("gender"):
-            await gender_cmd(update, context)
+        if state.get("pending"):
+            await update.effective_message.reply_text("Answer that first, then /task.")
             return
-        if not state.get("current_outfit"):
-            await outfit_cmd(update, context)
-            return
-        if not state.get("location"):
-            await location_cmd(update, context)
+        gap = slots.next_gap(state)
+        if gap:
+            await ask_slot(context.bot, update.effective_chat.id, state, gap)
             return
         if session.query(st.Task).filter_by(user_id=user.id, status="pending").first():
             await update.effective_message.reply_text("You already have one pending.")
@@ -1087,7 +1194,7 @@ async def handle_photo(update, context):
             return
         public = venue.exposure_rank(task.exposure or "") >= 2
         verdict = await verify.verify_photo(data, task.task_text, task.followup_target,
-                                            public=public)
+                                            public=public, worn=tk.worn_line(state))
         if verdict is None:
             await update.message.reply_text("Verifier down - resend, no attempt used.")
             return
@@ -1142,14 +1249,21 @@ async def handle_photo(update, context):
             session.commit()
             parts = framing.split_missing(missing)
             phone_miss = any(p.lower() in framing.SELFIE_INVISIBLE for p in parts)
+            body_items = [p for p in parts if not framing.is_scene(p)
+                          and p.lower() not in framing.SELFIE_INVISIBLE]
+            scene_items = [p for p in parts if framing.is_scene(p)]
             if phone_miss and framing.needs_mirror(task.task_text):
-                body = "Can't see the phone. Shoot it in the mirror - phone in frame, aimed at the glass."
-            elif phone_miss:
-                body = f"Can't see {missing}."
+                how = "Shoot it in the mirror - phone in frame, aimed at the glass."
+            elif body_items and scene_items:
+                how = (f"Close in on {', '.join(body_items)} and keep "
+                       f"{', '.join(scene_items)} behind you in frame.")
+            elif body_items:
+                how = f"One photo of just {', '.join(body_items)} - close in, nothing else in frame."
             else:
-                body = f"Can't see {missing}. One photo of just {missing} - close in, nothing else in frame."
+                how = f"Reshoot with {', '.join(scene_items)} actually in the frame."
             await update.message.reply_text(
-                f"{body}\n\n{left} {'try' if left == 1 else 'tries'} left.", reply_markup=keyboard)
+                f"Can't see {missing}. {how}\n\n{left} {'try' if left == 1 else 'tries'} left.",
+                reply_markup=keyboard)
         else:
             task.followup_target = None
             session.commit()
@@ -1238,6 +1352,10 @@ async def reset_cmd(update, context):
     state["location"] = None
     state["location_notes"] = None
     state["venue_typical"] = None
+    state["venue_profile"] = None
+    state["hide_spot"] = None
+    state["asked"] = {}
+    state["slot_skipped"] = []
     state["avatar_gender"] = None
     state["avatar_race"] = None
     state["avatar_build"] = None
@@ -1259,8 +1377,10 @@ async def scheduled_check(context):
             if session.query(st.Task).filter_by(user_id=row.user_id, status="pending").first():
                 continue
             state = st.get_state(row.user_id)
-            if not state.get("gender") or not state.get("location"):
-                state["next_task_time"] = now + timedelta(minutes=15)
+            gap = slots.next_gap(state)
+            if gap:
+                await ask_slot(context.bot, row.user_id, state, gap)
+                state["next_task_time"] = now + timedelta(minutes=30)
                 continue
             try:
                 text, risk, delta, exposure = await tk.generate_task_text(
@@ -1307,6 +1427,7 @@ def main():
     app.add_handler(CommandHandler("menu", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("details", details_cmd))
     app.add_handler(CommandHandler("variant", variant_cmd))
     app.add_handler(CommandHandler("privacy", privacy_cmd))
     app.add_handler(CommandHandler("intensity", intensity_cmd))
